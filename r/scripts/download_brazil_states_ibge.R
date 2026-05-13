@@ -12,8 +12,7 @@
 #
 # How to run
 #   - In RStudio: open this script, set `output_path`, Source.
-#   - CLI:  Rscript r/scripts/baixar_estados_br.R
-#     (or rename the file; path must match your filesystem)
+#   - CLI:  Rscript r/scripts/download_brazil_states_ibge.R
 #
 # Note
 #   Edit `output_path` to a folder on your machine. The sample path below is
