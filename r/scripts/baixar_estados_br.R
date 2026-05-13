@@ -1,15 +1,39 @@
-# 1. Carregue as bibliotecas necessárias
-library(geobr)
-library(sf) 
+# ==============================================================================
+# Download Brazilian state boundaries (IBGE / geobr) and save as GeoPackage
+# ==============================================================================
+#
+# What it does
+#   Fetches all state polygons for Brazil (year 2020) via {geobr} and writes
+#   them to a GeoPackage path you configure below.
+#
+# Requirements
+#   - R (>= 4.0 recommended)
+#   - install.packages(c("geobr", "sf"))
+#
+# How to run
+#   - In RStudio: open this script, set `output_path`, Source.
+#   - CLI:  Rscript r/scripts/baixar_estados_br.R
+#     (or rename the file; path must match your filesystem)
+#
+# Note
+#   Edit `output_path` to a folder on your machine. The sample path below is
+#   a placeholder from the original author environment.
+# ==============================================================================
 
-# 2. Baixe todos os estados do Brasil utilizando o ano mais recente disponível (2020)
+library(geobr)
+library(sf)
+
 estados_br <- read_state(code_state = "all", year = 2020)
 
-# Para visualizar os dados (opcional)
+# Optional quick map
 plot(estados_br$geom)
 
-# 3. Definir o caminho completo (incluindo o nome do arquivo final)
-caminho_salvar <- "H:/My Drive/PHD/02-Tese/02-data/adote-uma-leucena/v1-LEUCENA MAPPING/estados_brasil_2020.gpkg"
+# --- configure output (required) ---
+output_path <- "H:/My Drive/PHD/02-Tese/02-data/adote-uma-leucena/v1-LEUCENA MAPPING/estados_brasil_2020.gpkg"
 
-# 4. Salvar o arquivo
-st_write(estados_br, caminho_salvar)
+# Example: use an env var instead of hard-coding
+# output_path <- Sys.getenv("BRAZIL_STATES_GPKG", unset = "C:/data/estados_brasil_2020.gpkg")
+
+st_write(estados_br, output_path)
+
+message("Written: ", output_path)
