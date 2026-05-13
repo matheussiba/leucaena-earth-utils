@@ -1,35 +1,57 @@
-from qgis.core import (
-    QgsProject,
-    QgsVectorLayer,
-    QgsFeature,
-    QgsField
-)
+"""
+================================================================================
+Subgrid index (sub_2dd) for Leucaena.Earth export prep — São Paulo cells (PyQGIS)
+================================================================================
+
+What it does
+    1. Clones ``grid_mix_br_leucaenaearth-prep`` to an in-memory layer
+       ``grid_mix_br_subgrid`` and adds integer field ``sub_2dd``.
+    2. Groups cells that share the same ``row_value`` + ``col_value`` **and**
+       have ``states`` containing ``sp`` (São Paulo).
+    3. For groups with **exactly four** cells, sorts them by (-y, x) (top to
+       bottom, left to right) and writes sub-indices 1..4 into ``sub_2dd``.
+
+Why
+    Prepares hierarchical / sub-cell numbering expected by the Leucaena.Earth
+    grid export workflow for subdivided cells in SP.
+
+Prerequisites
+    - Source layer ``grid_mix_br_leucaenaearth-prep`` with fields:
+      ``row_value``, ``col_value``, ``states`` (``states`` should list UF codes
+      as produced by assign_states_to_grid.py).
+
+How to run
+    *Python Console* → *Show Editor* → paste → *Run script*.
+
+Output
+    - New memory layer ``grid_mix_br_subgrid`` added to the project.
+
+Limitations
+    - Only processes groups tied to SP; groups with count != 4 are skipped.
+================================================================================
+"""
+
+from qgis.core import QgsFeature, QgsField, QgsProject, QgsVectorLayer
 from PyQt5.QtCore import QVariant
 
-print("🚀 Criando cópia em memória com subgrid...")
+print("Building in-memory copy with subgrid field...")
 
-# ================================
-# LOAD ORIGINAL
-# ================================
+# ----- LOAD SOURCE -----
 orig = QgsProject.instance().mapLayersByName("grid_mix_br_leucaenaearth-prep")[0]
 
-# ================================
-# CREATE MEMORY COPY
-# ================================
+# ----- MEMORY COPY -----
 mem_layer = QgsVectorLayer(
     f"Polygon?crs={orig.crs().authid()}",
     "grid_mix_br_subgrid",
-    "memory"
+    "memory",
 )
 
 provider = mem_layer.dataProvider()
 
-# copiar campos
 provider.addAttributes(orig.fields())
 provider.addAttributes([QgsField("sub_2dd", QVariant.Int)])
 mem_layer.updateFields()
 
-# copiar features
 features = []
 
 for f in orig.getFeatures():
@@ -41,24 +63,14 @@ for f in orig.getFeatures():
 provider.addFeatures(features)
 mem_layer.updateExtents()
 
-print("✅ Cópia criada")
+print("Memory copy created.")
 
-# ================================
-# PREPARAR CAMPOS
-# ================================
-idx_row = mem_layer.fields().indexOf("row_value")
-idx_col = mem_layer.fields().indexOf("col_value")
-idx_state = mem_layer.fields().indexOf("states")
 idx_sub = mem_layer.fields().indexOf("sub_2dd")
 
-# ================================
-# GROUPING
-# ================================
+# ----- GROUP BY (row, col) FOR SP -----
 groups = {}
 
 for f in mem_layer.getFeatures():
-
-    # só SP (ou contém SP)
     if not f["states"] or "sp" not in f["states"]:
         continue
 
@@ -79,40 +91,24 @@ for f in mem_layer.getFeatures():
     if key not in groups:
         groups[key] = []
 
-    groups[key].append({
-        "id": f.id(),
-        "x": c.x(),
-        "y": c.y()
-    })
+    groups[key].append({"id": f.id(), "x": c.x(), "y": c.y()})
 
-print(f"📦 Grupos encontrados: {len(groups)}")
+print(f"Groups found: {len(groups)}")
 
-# ================================
-# ENUMERATION
-# ================================
+# ----- ENUMERATE sub_2dd -----
 updates = {}
 
-for key, feats in groups.items():
-
+for _key, feats in groups.items():
     if len(feats) != 4:
         continue
 
-    feats_sorted = sorted(
-        feats,
-        key=lambda f: (-f["y"], f["x"])
-    )
+    feats_sorted = sorted(feats, key=lambda rec: (-rec["y"], rec["x"]))
 
     for i, feat in enumerate(feats_sorted, 1):
         updates[feat["id"]] = {idx_sub: i}
 
-# ================================
-# APPLY
-# ================================
 mem_layer.dataProvider().changeAttributeValues(updates)
 
-# ================================
-# ADD TO QGIS
-# ================================
 QgsProject.instance().addMapLayer(mem_layer)
 
-print("✅ Nova layer criada com subgrid 2dd")
+print("Done: grid_mix_br_subgrid added with sub_2dd populated where applicable.")

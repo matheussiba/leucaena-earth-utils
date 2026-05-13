@@ -1,36 +1,49 @@
-from qgis.core import QgsProject, QgsField
+"""
+================================================================================
+Per-state cell sequence (state_seq) by spatial sort (PyQGIS)
+================================================================================
+
+What it does
+    Groups all grid cells by ``state_centroid``, sorts cells within each state
+    by (-centroid_y, centroid_x) (north to south, west to east), and writes a
+    zero-padded sequence string into ``state_seq`` (001, 002, …).
+
+Layer name
+    - ``grid_mix_br_leucaenaearth-prep`` — must contain ``id``, ``state_centroid``
+      (run assign_statescentroids_to_grid.py first).
+
+How to run
+    *Python Console* → *Show Editor* → paste → *Run script*.
+
+Output
+    - Field ``state_seq`` on the same layer (created if missing).
+================================================================================
+"""
+
+from qgis.core import QgsField, QgsProject
 from PyQt5.QtCore import QVariant
 import time
 
 start = time.time()
 
-print("🚀 Iniciando enumeração por estado...")
+print("Starting ordering_cell_number...")
 
 layer = QgsProject.instance().mapLayersByName("grid_mix_br_leucaenaearth-prep")[0]
 
-# ================================
-# CONFIG
-# ================================
 id_field = "id"
 state_field = "state_centroid"
 new_field = "state_seq"
 
-# ================================
-# ADD FIELD
-# ================================
 if new_field not in [f.name() for f in layer.fields()]:
-    print("➕ Criando campo state_seq...")
+    print("Creating field 'state_seq'...")
     layer.dataProvider().addAttributes([QgsField(new_field, QVariant.String)])
     layer.updateFields()
 
 idx_new = layer.fields().indexOf(new_field)
 
-# ================================
-# GROUP FEATURES
-# ================================
 groups = {}
 
-print("📦 Agrupando por estado...")
+print("Grouping features by state...")
 
 for f in layer.getFeatures():
     if f[id_field] is None:
@@ -51,33 +64,23 @@ for f in layer.getFeatures():
     if key not in groups:
         groups[key] = []
 
-    groups[key].append({
-        "id": f.id(),
-        "x": centroid.x(),
-        "y": centroid.y()
-    })
+    groups[key].append({"id": f.id(), "x": centroid.x(), "y": centroid.y()})
 
-print(f"🗺️ Estados encontrados: {len(groups)}")
+print(f"States in data: {len(groups)}")
 
-# ================================
-# ENUMERATION
-# ================================
 updates = {}
 
 for state, feats in groups.items():
-    print(f"🔢 Processando estado: {state} ({len(feats)} células)")
+    print(f"State {state}: {len(feats)} cells")
 
-    # ordenar: topo → baixo, esquerda → direita
-    feats_sorted = sorted(
-        feats,
-        key=lambda f: (-f["y"], f["x"])
-    )
+    # North → south, then west → east
+    feats_sorted = sorted(feats, key=lambda rec: (-rec["y"], rec["x"]))
 
     for i, feat in enumerate(feats_sorted, 1):
-        seq = str(i).zfill(3)  # 001, 002...
+        seq = str(i).zfill(3)
         updates[feat["id"]] = {idx_new: seq}
 
-print("💾 Aplicando mudanças...")
+print("Applying updates...")
 layer.dataProvider().changeAttributeValues(updates)
 
-print(f"✅ Finalizado em {round(time.time() - start, 2)}s")
+print(f"Finished in {round(time.time() - start, 2)} s")
