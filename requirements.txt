@@ -1,2 +1,10 @@
-# Standalone Python scripts (e.g. copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py)
+# Dependencies for standalone Python scripts in python/scripts/.
+
+# Used by:
+#   - copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py
+#   - build_4band_rgbir_geotiff_from_rgb_and_ir_false_color_per_aoi_tile.py
 geopandas>=0.14,<1.0
+
+# Used by:
+#   - build_4band_rgbir_geotiff_from_rgb_and_ir_false_color_per_aoi_tile.py
+rasterio>=1.3,<2.0

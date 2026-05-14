@@ -16,8 +16,9 @@
 | File | Purpose |
 |:-----|:--------|
 | `copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py` | Copy LAZ + RGB/IR GeoTIFF tiles listed in IGC-style articulation `*_selecao.shp` files into `laz/`, `rgb/`, `ir/` under a destination root. |
+| `build_4band_rgbir_geotiff_from_rgb_and_ir_false_color_per_aoi_tile.py` | For each tile listed in an AOI GeoPackage layer, fuse the matching RGB raster (3 bands) with the false-color IR raster (band 1 = NIR) into a single 4-band GeoTIFF (R, G, B, NIR) written to a new folder; originals are untouched. |
 
-**Dependency:** `geopandas` (see root `requirements.txt`). Example:
+**Dependencies:** `geopandas`, `rasterio` (see root `requirements.txt`). Example:
 
 ```bash
 pip install -r requirements.txt
