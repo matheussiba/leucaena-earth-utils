@@ -12,7 +12,7 @@
 #
 # How to run
 #   - In RStudio: open this script, set `output_path`, Source.
-#   - CLI:  Rscript r/scripts/download_brazil_states_ibge.R
+#   - CLI:  Rscript r/scripts/r_download_brazil_states_geobr_ibge2020.R
 #
 # Note
 #   Edit `output_path` to a folder on your machine. The sample path below is
