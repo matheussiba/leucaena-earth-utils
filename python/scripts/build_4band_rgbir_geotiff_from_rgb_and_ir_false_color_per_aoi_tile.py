@@ -60,25 +60,23 @@ from rasterio.errors import RasterioIOError
 # Default GeoPackage used unless an entry in AOI_LAYER_SPECS overrides it
 AOI_GPKG_PATH = r"G:\My Drive\PHD\02-Tese\02-data\adote-uma-leucena\v1-LEUCENA MAPPING\gdb-leucena_v2.gpkg"
 
-# One entry per AOI layer.
-# Required keys: "layer", "id_column"
-# Optional keys: "gpkg_path" (override AOI_GPKG_PATH), "enabled" (default True)
+# Default suffix appended to each "base_layer" to build the actual layer name
+# (e.g. "_AOI_treino" -> "articulacao_laser_voo22_AOI_treino").
+# Change here to switch every entry at once (e.g. "_AOI_test"), or override
+# per spec with the "suffix" key. To bypass entirely, set "layer" explicitly.
+AOI_LAYER_SUFFIX = "_AOI_treino"
+
+# One entry per articulation.
+#   "base_layer"  : articulation name (suffix is appended automatically)
+#   "id_column"   : tile-id column inside that layer
+#   "enabled"     : optional bool, default True
+#   "suffix"      : optional, overrides AOI_LAYER_SUFFIX for this entry only
+#   "layer"       : optional, absolute layer name (skips base_layer + suffix)
+#   "gpkg_path"   : optional, overrides AOI_GPKG_PATH for this entry only
 AOI_LAYER_SPECS: list[dict] = [
-    {
-        "layer": "articulacao_laser_fehidro_AOI_treino",
-        "id_column": "NOMENC_2K",
-        "enabled": True,
-    },
-    {
-        "layer": "articulacao_laser_lote4_AOI_treino",
-        "id_column": "NOMENC_5K",
-        "enabled": True,
-    },
-    {
-        "layer": "articulacao_laser_voo22_AOI_treino",
-        "id_column": "NOMENC_10K",
-        "enabled": True,
-    },
+    {"base_layer": "articulacao_laser_fehidro", "id_column": "NOMENC_2K",  "enabled": True},
+    {"base_layer": "articulacao_laser_lote4",   "id_column": "NOMENC_5K",  "enabled": True},
+    {"base_layer": "articulacao_laser_voo22",   "id_column": "NOMENC_10K", "enabled": True},
 ]
 
 # Source folders with original tiles
@@ -211,6 +209,22 @@ def _fuse_one_tile(rgb_path: str, ir_path: str, out_path: str) -> tuple[str, str
         return ("io_error", str(exc))
 
 
+def _resolve_layer_name(spec: dict) -> str:
+    """Resolve the final layer name from a spec entry.
+
+    Priority:
+      1. spec["layer"]                              (absolute name)
+      2. spec["base_layer"] + spec["suffix"]        (per-spec suffix)
+      3. spec["base_layer"] + AOI_LAYER_SUFFIX      (global default)
+    """
+    if spec.get("layer"):
+        return str(spec["layer"])
+    if "base_layer" not in spec:
+        raise KeyError("AOI spec needs either 'layer' or 'base_layer'")
+    suffix = spec.get("suffix", AOI_LAYER_SUFFIX) or ""
+    return f"{spec['base_layer']}{suffix}"
+
+
 def _load_aoi_tile_jobs() -> list[TileJob]:
     """Read every enabled AOI layer, union + de-duplicate tile ids."""
     jobs: list[TileJob] = []
@@ -219,7 +233,7 @@ def _load_aoi_tile_jobs() -> list[TileJob]:
     for spec in AOI_LAYER_SPECS:
         if not spec.get("enabled", True):
             continue
-        layer = spec["layer"]
+        layer = _resolve_layer_name(spec)
         col = spec["id_column"]
         gpkg = spec.get("gpkg_path", AOI_GPKG_PATH)
         print(f"Reading AOI layer: {gpkg} | layer={layer}")
