@@ -1,0 +1,2 @@
+# Standalone Python scripts (e.g. copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py)
+geopandas>=0.14,<1.0

@@ -13,7 +13,7 @@ Initial scripts were reorganized from a local `scripts` folder into the layout b
 | Path | Purpose |
 |:-----|:--------|
 | `python/qgis/` | Lightweight QGIS tools (`.py` for Processing / PyQGIS). |
-| `python/scripts/` | Standalone Python scripts (CLI, one-offs). |
+| `python/scripts/` | Standalone and PyQGIS scripts. **Naming:** `pyqgis_*` = QGIS Python console; otherwise CLI (see `python/scripts/README.md`). |
 | `python/notebooks/` | Jupyter notebooks (`.ipynb`). |
 | `r/scripts/` | Plain R scripts (`.R`). |
 | `r/quarto/` | Quarto documents (`.qmd`). |
@@ -25,7 +25,12 @@ Initial scripts were reorganized from a local `scripts` folder into the layout b
 
 ## Requirements
 
-- **Python:** project-specific; add dependencies to `requirements.txt` when you stabilize a script set.
+- **Python:** for CLI scripts such as `copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py`, install from the repo root:
+
+  ```bash
+  pip install -r requirements.txt
+  ```
+
 - **R / Quarto:** use your usual R install; add `renv` later if you want a reproducible R library.
 
 ## License

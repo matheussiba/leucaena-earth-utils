@@ -1,9 +1,13 @@
 # R scripts
 
-**Language:** English headers and comments.
+**Naming:** `r_` prefix + short action description + data source / year where relevant.
 
 | File | Summary |
 |:-----|:--------|
-| `download_brazil_states_ibge.R` | Download Brazil state polygons (IBGE 2020) with `geobr` and save to GeoPackage. Set `output_path` before running. |
+| `r_download_brazil_states_geobr_ibge2020.R` | Download Brazil state polygons (IBGE 2020) with `{geobr}` and save to GeoPackage. Set `output_path` before running. |
 
-Run from RStudio or `Rscript r/scripts/download_brazil_states_ibge.R` after `install.packages(c("geobr", "sf"))`.
+```bash
+Rscript r/scripts/r_download_brazil_states_geobr_ibge2020.R
+```
+
+Requires `install.packages(c("geobr", "sf"))`.
