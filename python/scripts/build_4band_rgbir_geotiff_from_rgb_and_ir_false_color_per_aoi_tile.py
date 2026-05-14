@@ -14,19 +14,23 @@ per tile with band assignments::
     band 3 = Blue      (from RGB band 3)
     band 4 = NIR       (from IR  band 1)
 
-Tile selection (AOI)
---------------------
-The list of tiles to fuse comes from a GeoPackage layer (the training AOI). The
-attribute column ``TILE_ID_COLUMN`` (default ``NOMENC_10K``) provides the tile
-identifier shared by the RGB and IR filenames.
+AOI sources (multiple articulation layers)
+------------------------------------------
+The IGC dataset uses different articulation grids per acquisition: Fehidro,
+Lote4 and Voo22. Each grid stores the tile identifier in a different column
+(typically ``NOMENC_2K``, ``NOMENC_5K`` or ``NOMENC_10K``). This script accepts
+**a list** of AOI layers, each with its own layer name and tile-id column,
+unions and de-duplicates the tile ids before fusion.
 
 Inputs / outputs
 ----------------
-- Original RGB and IR folders are **never touched**. The 4-band output is
-  written to a separate folder ``OUTPUT_FOLDER`` (created if missing).
-- Output filename: ``<TILE_ID>_rgbir.tif``.
-- The script verifies that the two source rasters cover the **same area at the
-  same resolution and CRS**; if not, the tile is skipped with a clear reason.
+- ``AOI_GPKG_PATH``: GeoPackage containing the AOI layers (per spec ``gpkg_path``
+  override is also supported).
+- ``SOURCE_RGB_FOLDER`` and ``SOURCE_IR_FOLDER``: the existing one-tile-per-file
+  folders. **They are never touched.**
+- ``OUTPUT_FOLDER``: where ``<TILE_ID>_rgbir.tif`` is written (created if missing).
+- The script verifies that the two source rasters cover the same area at the
+  same resolution and CRS; if not, the tile is skipped with a clear reason.
 
 Dependencies (see repo root ``requirements.txt``)
 -------------------------------------------------
@@ -53,10 +57,29 @@ from rasterio.errors import RasterioIOError
 # USER CONFIGURATION — edit only this block
 # =============================================================================
 
-# AOI GeoPackage and layer name. The layer must contain the tile-id column.
+# Default GeoPackage used unless an entry in AOI_LAYER_SPECS overrides it
 AOI_GPKG_PATH = r"G:\My Drive\PHD\02-Tese\02-data\adote-uma-leucena\v1-LEUCENA MAPPING\gdb-leucena_v2.gpkg"
-AOI_LAYER_NAME = "articulacao_laser_voo22_AOI_treino"
-TILE_ID_COLUMN = "NOMENC_10K"
+
+# One entry per AOI layer.
+# Required keys: "layer", "id_column"
+# Optional keys: "gpkg_path" (override AOI_GPKG_PATH), "enabled" (default True)
+AOI_LAYER_SPECS: list[dict] = [
+    {
+        "layer": "articulacao_laser_fehidro_AOI_treino",
+        "id_column": "NOMENC_2K",
+        "enabled": True,
+    },
+    {
+        "layer": "articulacao_laser_lote4_AOI_treino",
+        "id_column": "NOMENC_5K",
+        "enabled": True,
+    },
+    {
+        "layer": "articulacao_laser_voo22_AOI_treino",
+        "id_column": "NOMENC_10K",
+        "enabled": True,
+    },
+]
 
 # Source folders with original tiles
 SOURCE_RGB_FOLDER = r"D:\rgb"
@@ -90,8 +113,16 @@ RASTER_EXTENSIONS = (".tif", ".tiff")
 
 
 @dataclass
+class TileJob:
+    tile_id: str
+    source_layer: str
+    id_column: str
+
+
+@dataclass
 class TileSummary:
     tile_id: str
+    source_layer: str
     rgb_name: str | None
     ir_name: str | None
     status: str
@@ -162,7 +193,6 @@ def _fuse_one_tile(rgb_path: str, ir_path: str, out_path: str) -> tuple[str, str
                 if PREDICTOR:
                     profile.update(predictor=PREDICTOR)
 
-            # Use band 1 of RGB to keep dtype + nodata aligned with the source.
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             with rasterio.open(out_path, "w", **profile) as dst:
                 dst.write(rgb_src.read(1), 1)
@@ -181,26 +211,52 @@ def _fuse_one_tile(rgb_path: str, ir_path: str, out_path: str) -> tuple[str, str
         return ("io_error", str(exc))
 
 
-def _load_aoi_tile_ids() -> list[str]:
-    print(f"Reading AOI layer: {AOI_GPKG_PATH} | layer={AOI_LAYER_NAME}")
-    gdf = gpd.read_file(AOI_GPKG_PATH, layer=AOI_LAYER_NAME)
-    if TILE_ID_COLUMN not in gdf.columns:
-        raise SystemExit(
-            f"[ABORT] Column {TILE_ID_COLUMN!r} not found in layer. "
-            f"Columns available: {list(gdf.columns)}"
+def _load_aoi_tile_jobs() -> list[TileJob]:
+    """Read every enabled AOI layer, union + de-duplicate tile ids."""
+    jobs: list[TileJob] = []
+    seen: set[str] = set()
+
+    for spec in AOI_LAYER_SPECS:
+        if not spec.get("enabled", True):
+            continue
+        layer = spec["layer"]
+        col = spec["id_column"]
+        gpkg = spec.get("gpkg_path", AOI_GPKG_PATH)
+        print(f"Reading AOI layer: {gpkg} | layer={layer}")
+
+        try:
+            gdf = gpd.read_file(gpkg, layer=layer)
+        except Exception as exc:  # noqa: BLE001 - report and continue with other layers
+            print(f"  [SKIP LAYER] failed to read: {exc}")
+            continue
+
+        if col not in gdf.columns:
+            print(
+                f"  [SKIP LAYER] column {col!r} not found. "
+                f"Columns available: {list(gdf.columns)}"
+            )
+            continue
+
+        cleaned = (
+            gdf[col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace("", None)
+            .dropna()
+            .unique()
+            .tolist()
         )
-    ids = (
-        gdf[TILE_ID_COLUMN]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .replace("", None)
-        .dropna()
-        .unique()
-        .tolist()
-    )
-    print(f"  AOI tiles: {len(ids)}")
-    return ids
+        added = 0
+        for tid in cleaned:
+            if tid not in seen:
+                seen.add(tid)
+                jobs.append(TileJob(tile_id=tid, source_layer=layer, id_column=col))
+                added += 1
+        print(f"  Tiles read: {len(cleaned)} | new (after dedup): {added}")
+
+    print(f"\nTotal unique tiles across all AOI layers: {len(jobs)}")
+    return jobs
 
 
 def main() -> None:
@@ -208,8 +264,8 @@ def main() -> None:
 
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-    tile_ids = _load_aoi_tile_ids()
-    if not tile_ids:
+    jobs = _load_aoi_tile_jobs()
+    if not jobs:
         print("[ABORT] No tile ids in AOI.")
         return
 
@@ -227,49 +283,65 @@ def main() -> None:
     written = 0
     skipped_existing = 0
 
-    for i, tile_id in enumerate(tile_ids, 1):
+    for i, job in enumerate(jobs, 1):
+        tile_id = job.tile_id
         rgb_name = _find_tile_file(rgb_names, tile_id)
         ir_name = _find_tile_file(ir_names, tile_id)
 
         if not rgb_name and not ir_name:
-            summaries.append(TileSummary(tile_id, None, None, "missing_both"))
+            summaries.append(TileSummary(tile_id, job.source_layer, None, None, "missing_both"))
             continue
         if not rgb_name:
-            summaries.append(TileSummary(tile_id, None, ir_name, "missing_rgb"))
+            summaries.append(TileSummary(tile_id, job.source_layer, None, ir_name, "missing_rgb"))
             continue
         if not ir_name:
-            summaries.append(TileSummary(tile_id, rgb_name, None, "missing_ir"))
+            summaries.append(TileSummary(tile_id, job.source_layer, rgb_name, None, "missing_ir"))
             continue
 
         out_name = f"{tile_id}_rgbir.tif"
         out_path = os.path.join(OUTPUT_FOLDER, out_name)
         if os.path.exists(out_path) and not OVERWRITE_EXISTING_FILES:
             skipped_existing += 1
-            summaries.append(TileSummary(tile_id, rgb_name, ir_name, "skipped_existing"))
+            summaries.append(TileSummary(tile_id, job.source_layer, rgb_name, ir_name, "skipped_existing"))
             continue
 
         rgb_path = os.path.join(SOURCE_RGB_FOLDER, rgb_name)
         ir_path = os.path.join(SOURCE_IR_FOLDER, ir_name)
         status, detail = _fuse_one_tile(rgb_path, ir_path, out_path)
-        summaries.append(TileSummary(tile_id, rgb_name, ir_name, status, detail))
+        summaries.append(TileSummary(tile_id, job.source_layer, rgb_name, ir_name, status, detail))
 
         if status == "ok":
             written += 1
-            print(f"[{i}/{len(tile_ids)}] OK     {tile_id} -> {out_name}")
+            print(f"[{i}/{len(jobs)}] OK     {tile_id} ({job.source_layer}) -> {out_name}")
         else:
-            print(f"[{i}/{len(tile_ids)}] FAIL   {tile_id} ({status}) {detail}")
+            print(f"[{i}/{len(jobs)}] FAIL   {tile_id} ({job.source_layer}) {status}: {detail}")
 
+    # ---- summary ----
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print("OVERALL SUMMARY")
     print("=" * 60)
-    print(f"  AOI tiles:        {len(tile_ids)}")
-    print(f"  Written:          {written}")
-    print(f"  Skipped existing: {skipped_existing}")
+    print(f"  Unique tiles in AOI: {len(jobs)}")
+    print(f"  Written:             {written}")
+    print(f"  Skipped existing:    {skipped_existing}")
+
     by_status: dict[str, int] = {}
     for s in summaries:
         by_status[s.status] = by_status.get(s.status, 0) + 1
+    print("\n  Counts by status:")
     for status, count in sorted(by_status.items()):
-        print(f"  {status:18s} {count}")
+        print(f"    {status:18s} {count}")
+
+    print("\n  Counts by source layer:")
+    by_layer: dict[str, dict[str, int]] = {}
+    for s in summaries:
+        layer_map = by_layer.setdefault(s.source_layer, {})
+        layer_map[s.status] = layer_map.get(s.status, 0) + 1
+    for layer, status_map in by_layer.items():
+        total = sum(status_map.values())
+        print(f"    {layer} (n={total})")
+        for status, count in sorted(status_map.items()):
+            print(f"      {status:18s} {count}")
+
     print(f"\nElapsed: {time.time() - t_start:.2f} s")
 
 
