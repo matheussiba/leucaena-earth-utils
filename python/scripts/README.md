@@ -15,15 +15,31 @@
 
 | File | Purpose |
 |:-----|:--------|
-| `copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py` | Copy LAZ + RGB/IR GeoTIFF tiles listed in IGC-style articulation `*_selecao.shp` files into `laz/`, `rgb/`, `ir/` under a destination root. |
-| `build_4band_rgbir_geotiff_from_rgb_and_ir_false_color_per_aoi_tile.py` | For each tile listed across **one or more** AOI GeoPackage layers (Fehidro `NOMENC_2K`, Lote4 `NOMENC_5K`, Voo22 `NOMENC_10K`, …), fuse the matching RGB raster (3 bands) with the false-color IR raster (band 1 = NIR) into a single 4-band GeoTIFF (R, G, B, NIR) written to a new folder; originals are untouched. |
+| `transferir_laz_rgb_ir_v3_por_aoi.py` | Copy IGC-SP LAZ/RGB/IR tiles by intersecting any AOI (shp/geojson/gpkg/kml/kmz) with the merged articulation in `data/articulacao_igc_sp/`. Optional coverage GeoPackage output. |
 
-**Dependencies:** `geopandas`, `rasterio` (see root `requirements.txt`). Example:
+```powershell
+pip install -r ../../requirements.txt
 
-```bash
-pip install -r requirements.txt
-python copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py
+python transferir_laz_rgb_ir_v3_por_aoi.py `
+  --aoi "C:\Users\Public\Desktop\deleteme.shp" `
+  --source-laz "D:\laz" `
+  --source-rgb "D:\rgb" `
+  --source-ir  "D:\ir" `
+  --dest "C:\deleteme" `
+  --cobertura-out "C:\deleteme\cobertura_baixados.gpkg"
 ```
+
+Older segmentation-pipeline scripts that used to live here were **moved** into the
+sibling repository so that the whole pre-processing chain lives in one place:
+
+| Old location (here) | New location |
+|:--------------------|:-------------|
+| `copy_aerial_tiles_laz_rgb_ir_from_articulation_shapefiles.py` | [`leucaena-earth-segmentation/prep-copy-tiles-from-aoi.py`](https://github.com/matheussiba/leucaena-earth-segmentation/blob/main/prep-copy-tiles-from-aoi.py) |
+| `build_4band_rgbir_geotiff_from_rgb_and_ir_false_color_per_aoi_tile.py` | [`leucaena-earth-segmentation/prep-rgbnir-from-rgb-ir.py`](https://github.com/matheussiba/leucaena-earth-segmentation/blob/main/prep-rgbnir-from-rgb-ir.py) |
+
+(The companion `criar-overviews-qgis.ipynb` notebook in `python/notebooks/`
+was also moved — only the PowerShell cell — to
+[`leucaena-earth-segmentation/scripts/build-overviews-qgis.ps1`](https://github.com/matheussiba/leucaena-earth-segmentation/blob/main/scripts/build-overviews-qgis.ps1).)
 
 ---
 
