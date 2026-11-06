@@ -36,13 +36,14 @@ names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
 ``_ORTO_RGB`` / ``_ORTO_IR``, ``_V1``), they are still paired and the
 registry records ``modo_pareamento=nome_normalizado``.
 
-The output filename keeps the RGB family, so several products of the same
-tile can sit together in ``G:\\RGBNIR``:
+Several products of the same tile are all kept. For each cleaned tile id
+the script applies this cascade:
 
-    SF-22-X.tif                  plain RGB
-    SF-22-X_ORTM_V1.tif          from ORTM_RGB_<ID>_V1.tif
-    SF-22-X_ORTO.tif             from <ID>_ORTO-RGB.tif
-    SF-22-X_ORTO_V2.tif          from <ID>_ORTO-RGB_V2.tif
+    1. RAW + RAW              -> <ID>.tif
+    2. same family and version-> <ID>_ORTO.tif, <ID>_ORTM_V1.tif, ...
+    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO.tif
+    4. different families     -> <ID>-CEN4-ORTM-ORTO.tif
+    5. nothing left to pair   -> no GeoTIFF; the file is only listed in the CSV
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -117,13 +118,28 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("ir_nome", "Nome do arquivo IR usado neste par. Vazio se este IR nao existe.", "SF-23.tif"),
     (
         "saida_nome",
-        "Nome do GeoTIFF em G:\\RGBNIR. Comum: ID.tif. Familia ORTM: ID_ORTM ou ID_ORTM_V1. Familia ORTO: ID_ORTO ou ID_ORTO_V2. A versao sai do nome do RGB.",
+        "Nome do GeoTIFF. Cenario 1: ID.tif. Cenario 2: ID_ORTO.tif ou ID_ORTM_V1.tif. Cenario 3: ID-CEN3-RAW-ORTO.tif. Cenario 4: ID-CEN4-ORTM-ORTO.tif.",
         "SF-22-X_ORTM_V1.tif",
     ),
     (
+        "cenario",
+        "1=puro+puro, 2=mesma familia e versao, 3=puro com familia sem par, 4=familias diferentes, 5=sem par ou anomalia (nao gera tif).",
+        "2",
+    ),
+    (
+        "tipo_rgb",
+        "Classificacao do RGB: RAW (puro), ou familia/versao como ORTO, ORTM, ORTM_V1, R1, V2.",
+        "ORTM_V1",
+    ),
+    (
+        "tipo_ir",
+        "Classificacao do IR, no mesmo vocabulario de tipo_rgb. RAW representa o arquivo puro.",
+        "ORTO",
+    ),
+    (
         "modo_pareamento",
-        "nome_igual = mesmo nome nas duas pastas; nome_normalizado = so casou depois de tirar prefixo/sufixo IGC; nenhum = sem par.",
-        "nome_igual",
+        "cenario_1 a cenario_4 quando houve par. nenhum quando o arquivo ficou no cenario 5.",
+        "cenario_2",
     ),
     (
         "tipo_registro",
@@ -176,7 +192,11 @@ STATUS_HELP: list[tuple[str, str]] = [
     ("pendente", "Par encontrado, ainda sem arquivo final. Entra na fila desta execucao."),
     ("falha", "A gravacao nao terminou. O parcial foi apagado. Rodar o .bat de novo tenta so este de novo."),
     ("interrompido", "Ctrl+C no meio deste tile. Nada final foi deixado. Rodar de novo continua por ele."),
-    ("sem_par", "RGB sem IR, ou IR sem RGB. Nao ha o que juntar ate o arquivo parceiro aparecer."),
+    ("sem_par", "Cenario 5. Nao havia arquivo do outro lado para formar par. Nenhum tif foi gerado."),
+    (
+        "anomalia",
+        "Cenario 5. O tile tinha mais de um arquivo do mesmo tipo, ou o nome nao virou um id. Nenhum tif foi gerado para este arquivo.",
+    ),
     (
         "duplicata_ignorada",
         "Dois arquivos com o mesmo nome. O script ficou com o maior e registrou este aqui sem usa-lo.",
@@ -382,46 +402,44 @@ def tile_key_from_filename(filename: str) -> str:
         previous = stem
         stem = re.sub(r"(?i)_ORTO[_-](?:RGB|IR)$", "", stem)
         stem = re.sub(r"(?i)_V\d+$", "", stem)
+        stem = re.sub(r"(?i)_R\d+$", "", stem)
     return stem.strip()
 
 
-def generate_smart_output_name(rgb_filename: str, tile_key: str) -> str:
-    """Nome de saida que preserva a familia e a versao do RGB original.
+def classify_product(filename: str) -> str:
+    """RAW, or a family/version token such as ORTO, ORTM_V1, R1, ORTO_V2.
 
-    O id usado no nome e sempre o id limpo (sem ORTM_RGB_, _ORTO-RGB, _V1).
-    A familia e a versao sao lidas do nome original do RGB:
-
-        SF-22-X.tif                 -> SF-22-X.tif
-        ORTM_RGB_<ID>_V1.tif        -> <ID>_ORTM_V1.tif
-        <ID>_ORTO-RGB.tif           -> <ID>_ORTO.tif
-        <ID>_ORTO-RGB_V2.tif        -> <ID>_ORTO_V2.tif
+    RAW means the name has none of ORTO, ORTM, ``_V1``/``_V2`` or ``_R1``.
+    The token is what cenarios 2, 3 and 4 write into the output filename.
     """
-    cleaned = tile_key_from_filename(tile_key)
-    stem = safe_output_stem(cleaned or tile_key)
-    # A versao fica no stem, nao na extensao. Procurar em maiusculas contra
-    # ".tif" minusculo falhava e a saida perdia o _V1.
-    v_match = re.search(r"_(V\d+)$", Path(rgb_filename).stem, re.IGNORECASE)
-    version_suffix = f"_{v_match.group(1).upper()}" if v_match else ""
-    name_upper = rgb_filename.upper()
-    if "ORTM" in name_upper:
-        return f"{stem}_ORTM{version_suffix}.tif"
-    if "ORTO" in name_upper:
-        return f"{stem}_ORTO{version_suffix}.tif"
-    return f"{stem}.tif"
+    stem = Path(filename).stem
+    upper = stem.upper()
+    parts: list[str] = []
+    if "ORTM" in upper:
+        parts.append("ORTM")
+    elif "ORTO" in upper:
+        parts.append("ORTO")
+    versions = re.findall(r"(?i)(?:^|_)(V\d+)(?:_|$)", stem)
+    revisions = re.findall(r"(?i)(?:^|_)(R\d+)(?:_|$)", stem)
+    if versions:
+        parts.append(versions[-1].upper())
+    if revisions:
+        parts.append(revisions[-1].upper())
+    return "_".join(parts) if parts else "RAW"
 
 
-def _variant_bucket(hit: RasterHit) -> str:
-    """Separa plain, ORTM e ORTO (e V1/V2) do mesmo tile para nao colidirem."""
-    name_upper = hit.filename.upper()
-    if "ORTM" in name_upper:
-        family = "ORTM"
-    elif "ORTO" in name_upper:
-        family = "ORTO"
-    else:
-        family = "BASE"
-    v_match = re.search(r"_(V\d+)$", Path(hit.filename).stem, re.IGNORECASE)
-    version = v_match.group(1).upper() if v_match else ""
-    return f"{hit.tile_key.casefold()}|{family}|{version}"
+def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir: str) -> str:
+    """Filename for cenarios 1-4. Cenario 5 does not write a GeoTIFF."""
+    stem = safe_output_stem(tile_id)
+    if cenario == 1:
+        return f"{stem}.tif"
+    if cenario == 2:
+        return f"{stem}_{tipo_rgb}.tif"
+    if cenario == 3:
+        return f"{stem}-CEN3-{tipo_rgb}-{tipo_ir}.tif"
+    if cenario == 4:
+        return f"{stem}-CEN4-{tipo_rgb}-{tipo_ir}.tif"
+    raise ValueError(f"cenario sem arquivo de saida: {cenario}")
 
 
 def safe_output_stem(stem: str) -> str:
@@ -513,14 +531,20 @@ def _row_for_pair(
     rgb: RasterHit,
     ir: RasterHit,
     *,
-    match_mode: str,
+    tile_id: str,
+    cenario: int,
+    tipo_rgb: str,
+    tipo_ir: str,
     output_name: str,
     detail: str = "",
 ) -> dict[str, str]:
     row = blank_row()
     row["tipo_registro"] = "par"
-    row["modo_pareamento"] = match_mode
-    row["tile_key"] = Path(output_name).stem
+    row["modo_pareamento"] = f"cenario_{cenario}"
+    row["cenario"] = str(cenario)
+    row["tipo_rgb"] = tipo_rgb
+    row["tipo_ir"] = tipo_ir
+    row["tile_key"] = tile_id
     row["rgb_nome"] = rgb.filename
     row["ir_nome"] = ir.filename
     row["rgb_caminho"] = rgb.path
@@ -541,14 +565,21 @@ def _row_for_leftover(
     status: str,
     detail: str,
     rgb: bool,
+    cenario: str = "5",
+    tipo: str = "",
 ) -> dict[str, str]:
     row = blank_row()
     row["tipo_registro"] = kind
     row["status"] = status
     row["modo_pareamento"] = "nenhum"
+    row["cenario"] = cenario
     row["detalhe"] = detail
     row["bandas_rgb"] = "1,2,3" if rgb else ""
     row["banda_nir_ir"] = "" if rgb else str(IR_NIR_BAND_INDEX)
+    if rgb:
+        row["tipo_rgb"] = tipo
+    else:
+        row["tipo_ir"] = tipo
     if hit is None:
         return row
     row["tile_key"] = hit.tile_key or Path(hit.filename).stem
@@ -563,28 +594,53 @@ def _row_for_leftover(
     return row
 
 
-def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing:
-    """Pair RGB with IR. Exact filename wins; IGC wrappers are the fallback.
+def _pick_one_per_type(
+    hits: list[RasterHit],
+) -> tuple[dict[str, RasterHit], list[tuple[RasterHit, str]]]:
+    """One file per product type (the largest). The others are anomalies."""
+    grouped: dict[str, list[RasterHit]] = {}
+    for hit in hits:
+        grouped.setdefault(classify_product(hit.filename), []).append(hit)
+    chosen: dict[str, RasterHit] = {}
+    extras: list[tuple[RasterHit, str]] = []
+    for tipo, group in grouped.items():
+        group.sort(key=lambda item: (-item.size, item.filename.casefold()))
+        chosen[tipo] = group[0]
+        for extra in group[1:]:
+            extras.append((extra, tipo))
+    return chosen, extras
 
-    Files that share a tile id but belong to different families (plain, ORTM,
-    ORTO) or versions (V1, V2) are paired separately. The output name keeps
-    that family, so they do not overwrite each other. Two pairs that still
-    produce the same output filename: the first claim wins and the other is
-    ``conflito_saida``.
-    """
-    rgb_by_name, rgb_dups = _index_by_filename(rgb_hits, "RGB")
-    ir_by_name, ir_dups = _index_by_filename(ir_hits, "IR")
 
-    pairing = Pairing()
-    claimed_output: dict[str, str] = {}
+def _cascade_one_tile(
+    tile_id: str,
+    rgb_hits: list[RasterHit],
+    ir_hits: list[RasterHit],
+    pairing: Pairing,
+    claimed_output: dict[str, str],
+) -> None:
+    """Apply cenarios 1-5 to every file that shares ``tile_id``."""
+    rgb_by_type, rgb_extras = _pick_one_per_type(rgb_hits)
+    ir_by_type, ir_extras = _pick_one_per_type(ir_hits)
     used_rgb: set[str] = set()
     used_ir: set[str] = set()
 
-    def claim(row: dict[str, str]) -> None:
-        key = row["saida_nome"].casefold()
+    def claim(rgb: RasterHit, ir: RasterHit, cenario: int, tipo_rgb: str, tipo_ir: str, detail: str) -> None:
+        output_name = output_name_for_scenario(tile_id, cenario, tipo_rgb, tipo_ir)
+        row = _row_for_pair(
+            rgb,
+            ir,
+            tile_id=tile_id,
+            cenario=cenario,
+            tipo_rgb=tipo_rgb,
+            tipo_ir=tipo_ir,
+            output_name=output_name,
+            detail=detail,
+        )
+        key = output_name.casefold()
         if key in claimed_output:
             row["tipo_registro"] = "conflito_saida"
             row["status"] = "conflito_saida"
+            row["cenario"] = "5"
             row["saida_nome"] = ""
             row["saida_caminho"] = ""
             row["detalhe"] = (
@@ -593,74 +649,186 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
             )
             pairing.leftovers.append(row)
             log(
-                f"  CONFLITO de nome de saida: RGB={row['rgb_nome']} IR={row['ir_nome']} "
-                f"queria o mesmo arquivo que {claimed_output[key]}. Este par foi deixado de fora."
+                f"  CONFLITO {tile_id}: {output_name} ja reservado por {claimed_output[key]}."
             )
             return
-        claimed_output[key] = f"RGB={row['rgb_nome']} + IR={row['ir_nome']}"
+        claimed_output[key] = f"RGB={rgb.filename} + IR={ir.filename}"
         pairing.pairs.append(row)
-
-    exact_names = sorted(set(rgb_by_name) & set(ir_by_name))
-    for name_key in exact_names:
-        rgb = rgb_by_name[name_key]
-        ir = ir_by_name[name_key]
-        output_name = generate_smart_output_name(rgb.filename, Path(rgb.filename).stem)
-        claim(_row_for_pair(rgb, ir, match_mode="nome_igual", output_name=output_name))
-        used_rgb.add(name_key)
-        used_ir.add(name_key)
-
-    rgb_left = {key: hit for key, hit in rgb_by_name.items() if key not in used_rgb}
-    ir_left = {key: hit for key, hit in ir_by_name.items() if key not in used_ir}
-
-    rgb_by_tile: dict[str, list[RasterHit]] = {}
-    ir_by_tile: dict[str, list[RasterHit]] = {}
-    for hit in rgb_left.values():
-        if hit.tile_key:
-            rgb_by_tile.setdefault(_variant_bucket(hit), []).append(hit)
-    for hit in ir_left.values():
-        if hit.tile_key:
-            ir_by_tile.setdefault(_variant_bucket(hit), []).append(hit)
-
-    normalized_used_rgb: set[str] = set()
-    normalized_used_ir: set[str] = set()
-    for tile_key in sorted(set(rgb_by_tile) & set(ir_by_tile)):
-        rgb_group = rgb_by_tile[tile_key]
-        ir_group = ir_by_tile[tile_key]
-        if len(rgb_group) != 1 or len(ir_group) != 1:
-            detail = (
-                f"Id normalizado '{rgb_group[0].tile_key}' e ambiguo: "
-                f"{len(rgb_group)} RGB e {len(ir_group)} IR. Nenhum foi juntado por este id."
+        used_rgb.add(tipo_rgb)
+        used_ir.add(tipo_ir)
+        if cenario in {3, 4}:
+            log(
+                f"  CENARIO {cenario} {tile_id}: "
+                f"RGB {rgb.filename} ({tipo_rgb}) + IR {ir.filename} ({tipo_ir}) -> {output_name}"
             )
-            log(f"  AMBIGUO: {detail}")
-            for hit in rgb_group:
-                pairing.leftovers.append(
-                    _row_for_leftover(hit, kind="rgb_sem_ir", status="sem_par", detail=detail, rgb=True)
-                )
-                normalized_used_rgb.add(hit.name_key)
-            for hit in ir_group:
-                pairing.leftovers.append(
-                    _row_for_leftover(hit, kind="ir_sem_rgb", status="sem_par", detail=detail, rgb=False)
-                )
-                normalized_used_ir.add(hit.name_key)
-            continue
-        rgb = rgb_group[0]
-        ir = ir_group[0]
-        output_name = generate_smart_output_name(rgb.filename, rgb.tile_key)
+
+    if "RAW" in rgb_by_type and "RAW" in ir_by_type:
         claim(
-            _row_for_pair(
-                rgb,
-                ir,
-                match_mode="nome_normalizado",
-                output_name=output_name,
-                detail=(
-                    "Os nomes dos arquivos nao sao iguais. Casaram pelo id IGC "
-                    f"'{rgb.tile_key}' depois de remover ORTM_RGB_/ORTM_IR_/_ORTO_RGB/_ORTO_IR/_V1."
-                ),
+            rgb_by_type["RAW"],
+            ir_by_type["RAW"],
+            1,
+            "RAW",
+            "RAW",
+            "Cenario 1: puro do RGB com puro do IR.",
+        )
+
+    for tipo in sorted(set(rgb_by_type) & set(ir_by_type)):
+        if tipo == "RAW" or tipo in used_rgb or tipo in used_ir:
+            continue
+        claim(
+            rgb_by_type[tipo],
+            ir_by_type[tipo],
+            2,
+            tipo,
+            tipo,
+            f"Cenario 2: mesma familia e versao ({tipo}) nos dois lados.",
+        )
+
+    raw_rgb_left = "RAW" in rgb_by_type and "RAW" not in used_rgb
+    raw_ir_left = "RAW" in ir_by_type and "RAW" not in used_ir
+    fam_rgb = sorted(tipo for tipo in rgb_by_type if tipo != "RAW" and tipo not in used_rgb)
+    fam_ir = sorted(tipo for tipo in ir_by_type if tipo != "RAW" and tipo not in used_ir)
+
+    if raw_rgb_left and fam_ir and not raw_ir_left:
+        for tipo_ir in fam_ir:
+            claim(
+                rgb_by_type["RAW"],
+                ir_by_type[tipo_ir],
+                3,
+                "RAW",
+                tipo_ir,
+                f"Cenario 3: RGB puro fechou par com IR {tipo_ir}, que nao tinha familia igual.",
+            )
+    elif raw_ir_left and fam_rgb and not raw_rgb_left:
+        for tipo_rgb in fam_rgb:
+            claim(
+                rgb_by_type[tipo_rgb],
+                ir_by_type["RAW"],
+                3,
+                tipo_rgb,
+                "RAW",
+                f"Cenario 3: IR puro fechou par com RGB {tipo_rgb}, que nao tinha familia igual.",
+            )
+
+    fam_rgb = sorted(tipo for tipo in rgb_by_type if tipo != "RAW" and tipo not in used_rgb)
+    fam_ir = sorted(tipo for tipo in ir_by_type if tipo != "RAW" and tipo not in used_ir)
+    for tipo_rgb, tipo_ir in zip(fam_rgb, fam_ir):
+        claim(
+            rgb_by_type[tipo_rgb],
+            ir_by_type[tipo_ir],
+            4,
+            tipo_rgb,
+            tipo_ir,
+            f"Cenario 4: familias diferentes, RGB {tipo_rgb} com IR {tipo_ir}.",
+        )
+
+    def _leftover_side(by_type: dict[str, RasterHit], extras: list[tuple[RasterHit, str]], *, rgb: bool) -> None:
+        used = used_rgb if rgb else used_ir
+        kind = "rgb_sem_ir" if rgb else "ir_sem_rgb"
+        lado = "RGB" if rgb else "IR"
+        outro = "IR" if rgb else "RGB"
+        for tipo, hit in sorted(by_type.items()):
+            if tipo in used:
+                continue
+            pairing.leftovers.append(
+                _row_for_leftover(
+                    hit,
+                    kind=kind,
+                    status="sem_par",
+                    detail=(
+                        f"Cenario 5: {lado} tipo {tipo} do tile {tile_id} ficou sem par no {outro}. "
+                        "Nenhum tif foi gerado."
+                    ),
+                    rgb=rgb,
+                    cenario="5",
+                    tipo=tipo,
+                )
+            )
+        for hit, tipo in extras:
+            pairing.leftovers.append(
+                _row_for_leftover(
+                    hit,
+                    kind="anomalia",
+                    status="anomalia",
+                    detail=(
+                        f"Cenario 5: outro arquivo {lado} do tipo {tipo} ja representa o tile {tile_id} "
+                        f"(ficou o maior). '{hit.filename}' nao gerou tif."
+                    ),
+                    rgb=rgb,
+                    cenario="5",
+                    tipo=tipo,
+                )
+            )
+
+    _leftover_side(rgb_by_type, rgb_extras, rgb=True)
+    _leftover_side(ir_by_type, ir_extras, rgb=False)
+
+
+def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing:
+    """Pair every consistent RGB/IR option of the same tile id.
+
+    Cenarios 1 to 4 write a GeoTIFF. Cenario 5 only records the file.
+    Counts are not fixed here: each row carries ``cenario`` and the summary
+    adds them up.
+    """
+    rgb_by_name, rgb_dups = _index_by_filename(rgb_hits, "RGB")
+    ir_by_name, ir_dups = _index_by_filename(ir_hits, "IR")
+    pairing = Pairing()
+    claimed_output: dict[str, str] = {}
+
+    rgb_groups: dict[str, list[RasterHit]] = {}
+    ir_groups: dict[str, list[RasterHit]] = {}
+    rgb_nameless: list[RasterHit] = []
+    ir_nameless: list[RasterHit] = []
+    for hit in rgb_by_name.values():
+        if hit.tile_key:
+            rgb_groups.setdefault(hit.tile_key.casefold(), []).append(hit)
+        else:
+            rgb_nameless.append(hit)
+    for hit in ir_by_name.values():
+        if hit.tile_key:
+            ir_groups.setdefault(hit.tile_key.casefold(), []).append(hit)
+        else:
+            ir_nameless.append(hit)
+
+    display_id: dict[str, str] = {}
+    for groups in (rgb_groups, ir_groups):
+        for key, hits in groups.items():
+            display_id.setdefault(key, hits[0].tile_key)
+
+    for key in sorted(set(rgb_groups) | set(ir_groups)):
+        _cascade_one_tile(
+            display_id[key],
+            rgb_groups.get(key, []),
+            ir_groups.get(key, []),
+            pairing,
+            claimed_output,
+        )
+
+    for hit in rgb_nameless:
+        pairing.leftovers.append(
+            _row_for_leftover(
+                hit,
+                kind="anomalia",
+                status="anomalia",
+                detail="Cenario 5: o nome do RGB nao produziu um id de tile. Nenhum tif foi gerado.",
+                rgb=True,
+                cenario="5",
+                tipo=classify_product(hit.filename),
             )
         )
-        normalized_used_rgb.add(rgb.name_key)
-        normalized_used_ir.add(ir.name_key)
-
+    for hit in ir_nameless:
+        pairing.leftovers.append(
+            _row_for_leftover(
+                hit,
+                kind="anomalia",
+                status="anomalia",
+                detail="Cenario 5: o nome do IR nao produziu um id de tile. Nenhum tif foi gerado.",
+                rgb=False,
+                cenario="5",
+                tipo=classify_product(hit.filename),
+            )
+        )
     for hit in rgb_dups:
         pairing.leftovers.append(
             _row_for_leftover(
@@ -669,6 +837,8 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
                 status="duplicata_ignorada",
                 detail="Mesmo nome de arquivo RGB em outro caminho. Ficou o arquivo maior; este foi ignorado.",
                 rgb=True,
+                cenario="",
+                tipo=classify_product(hit.filename),
             )
         )
     for hit in ir_dups:
@@ -679,33 +849,11 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
                 status="duplicata_ignorada",
                 detail="Mesmo nome de arquivo IR em outro caminho. Ficou o arquivo maior; este foi ignorado.",
                 rgb=False,
+                cenario="",
+                tipo=classify_product(hit.filename),
             )
         )
-
-    for name_key, hit in sorted(rgb_left.items()):
-        if name_key in normalized_used_rgb:
-            continue
-        pairing.leftovers.append(
-            _row_for_leftover(
-                hit,
-                kind="rgb_sem_ir",
-                status="sem_par",
-                detail="Nenhum IR com o mesmo nome (nem com o mesmo id normalizado) foi encontrado na pasta de IR.",
-                rgb=True,
-            )
-        )
-    for name_key, hit in sorted(ir_left.items()):
-        if name_key in normalized_used_ir:
-            continue
-        pairing.leftovers.append(
-            _row_for_leftover(
-                hit,
-                kind="ir_sem_rgb",
-                status="sem_par",
-                detail="Nenhum RGB com o mesmo nome (nem com o mesmo id normalizado) foi encontrado na pasta de RGB.",
-                rgb=False,
-            )
-        )
+    pairing.pairs.sort(key=lambda row: (row["tile_key"].casefold(), row["cenario"], row["saida_nome"].casefold()))
     return pairing
 
 
@@ -722,22 +870,21 @@ def compose_note(row: dict[str, str], out_dir: Path) -> str:
             "pulado_ja_existe": "Ja existia, nao refez",
             "pendente": "Vai juntar",
         }[status]
-        extra = ""
-        if row.get("modo_pareamento") == "nome_normalizado":
-            extra = (
-                " Os arquivos nao tem o mesmo nome; casaram pelo id do tile "
-                f"'{row.get('tile_key', '')}'."
-            )
+        cenario = row.get("cenario") or "?"
+        tipo_rgb = row.get("tipo_rgb") or "?"
+        tipo_ir = row.get("tipo_ir") or "?"
         return (
-            f"{verb}: RGB '{rgb}' bandas 1-3 (Red, Green, Blue) + "
-            f"IR '{ir}' banda {band} (NIR) -> '{out}'.{extra}"
+            f"{verb} cenario {cenario}: RGB '{rgb}' ({tipo_rgb}) bandas 1-3 "
+            f"+ IR '{ir}' ({tipo_ir}) banda {band} (NIR) -> '{out}'."
         )
     if status == "falha":
         return f"Falhou ao juntar RGB '{rgb}' com IR '{ir}' em '{out}'. {row['detalhe']}".strip()
     if status == "interrompido":
         return f"Interrompido no meio da juncao de RGB '{rgb}' com IR '{ir}'. Rode de novo para continuar."
     if status == "sem_par":
-        return row["detalhe"] or f"Sem par: RGB '{rgb}' IR '{ir}'."
+        return row["detalhe"] or f"Cenario 5, sem par: RGB '{rgb}' IR '{ir}'."
+    if status == "anomalia":
+        return row["detalhe"] or f"Cenario 5, anomalia: RGB '{rgb}' IR '{ir}'."
     if status == "duplicata_ignorada":
         return row["detalhe"]
     if status == "conflito_saida":
@@ -757,7 +904,8 @@ _STATUS_ORDER = {
     "ok": 4,
     "conflito_saida": 5,
     "sem_par": 6,
-    "duplicata_ignorada": 7,
+    "anomalia": 7,
+    "duplicata_ignorada": 8,
 }
 
 _PRESERVE_FROM_PREVIOUS = (
@@ -821,12 +969,11 @@ def write_dictionary(path: Path) -> None:
             }
         )
     for code, desc in (
-        ("nome_igual", "O arquivo RGB e o arquivo IR tem exatamente o mesmo nome."),
-        (
-            "nome_normalizado",
-            "Os nomes diferem, mas o id do tile e o mesmo depois de tirar ORTM_RGB_/ORTM_IR_/_ORTO_RGB/_ORTO_IR/_Vn.",
-        ),
-        ("nenhum", "Nao houve par. A linha e um arquivo sobrando, uma duplicata ou um conflito."),
+        ("cenario_1", "Puro com puro. Saida: ID.tif."),
+        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO.tif ou ID_ORTM_V1.tif."),
+        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO.tif."),
+        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO.tif."),
+        ("nenhum", "Cenario 5, duplicata ou conflito. Nao houve GeoTIFF para esta linha."),
     ):
         rows.append(
             {
@@ -922,7 +1069,32 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
             f"{percent:.2f}",
             "Percentual dos pares que ja tem arquivo final. 100 significa que nao falta nenhum par.",
         ),
-        metric("pares_encontrados", total_pairs, "RGB e IR que casaram pelo nome (ou pelo id normalizado)."),
+        metric("pares_encontrados", total_pairs, "Pares dos cenarios 1 a 4. Cada um gera um GeoTIFF."),
+        metric(
+            "cenario_1_puro_puro",
+            sum(1 for row in pairs if row.get("cenario") == "1"),
+            "Cenario 1. Puro do RGB com puro do IR. Saida ID.tif.",
+        ),
+        metric(
+            "cenario_2_mesma_familia",
+            sum(1 for row in pairs if row.get("cenario") == "2"),
+            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO.tif ou ID_ORTM_V1.tif.",
+        ),
+        metric(
+            "cenario_3_puro_com_familia",
+            sum(1 for row in pairs if row.get("cenario") == "3"),
+            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR.tif.",
+        ),
+        metric(
+            "cenario_4_familias_diferentes",
+            sum(1 for row in pairs if row.get("cenario") == "4"),
+            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR.tif.",
+        ),
+        metric(
+            "cenario_5_sem_tif",
+            sum(1 for row in rows if row.get("cenario") == "5"),
+            "Cenario 5. Arquivos que nao formaram par. Nenhum tif foi gerado para eles.",
+        ),
         metric(
             "gravados_nesta_execucao",
             written_now,
@@ -947,6 +1119,11 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
             "ir_sem_rgb",
             sum(1 for row in rows if row["tipo_registro"] == "ir_sem_rgb"),
             "Arquivos em F:\\IR sem RGB correspondente. Na proxima execucao eles entram se o RGB aparecer.",
+        ),
+        metric(
+            "anomalias",
+            sum(1 for row in rows if row.get("status") == "anomalia"),
+            "Cenario 5. Tipo repetido no mesmo tile, ou nome sem id. Nao geraram tif.",
         ),
         metric(
             "duplicatas_ignoradas",
@@ -1396,40 +1573,52 @@ def _assign_resume_status(
     return skipped, queue
 
 
+def _print_scenario_audit(rows: list[dict[str, str]]) -> None:
+    """Counts come from the rows themselves. Nothing here is a fixed quantity."""
+    pairs = [row for row in rows if row.get("tipo_registro") == "par"]
+    def ncen(number: str) -> int:
+        return sum(1 for row in pairs if row.get("cenario") == number)
+
+    rgb_sem = sum(1 for row in rows if row.get("tipo_registro") == "rgb_sem_ir")
+    ir_sem = sum(1 for row in rows if row.get("tipo_registro") == "ir_sem_rgb")
+    anomalias = sum(1 for row in rows if row.get("status") == "anomalia")
+    log("Auditoria dos cenarios (contada nesta execucao):")
+    log(f"  Cenario 1 puro+puro:            {ncen('1')}")
+    log(f"  Cenario 2 mesma familia:        {ncen('2')}")
+    log(f"  Cenario 3 puro com familia:     {ncen('3')}")
+    log(f"  Cenario 4 familias diferentes:  {ncen('4')}")
+    log(f"  Cenario 5 sem tif:              {sum(1 for row in rows if row.get('cenario') == '5')}")
+    log(f"  {rgb_sem} arquivos RGB sem IR")
+    log(f"  {ir_sem} arquivos IR sem RGB")
+    log(f"  {anomalias} anomalias (tipo repetido ou nome sem id)")
+
+
 def _print_pair_plan(pairs: list[dict[str, str]], queue: list[dict[str, str]], skipped: list[dict[str, str]]) -> None:
-    exact = sum(1 for row in pairs if row["modo_pareamento"] == "nome_igual")
-    normalized = sum(1 for row in pairs if row["modo_pareamento"] == "nome_normalizado")
-    log(f"Pares pelo mesmo nome: {exact}")
-    log(f"Pares so pelo id normalizado (nomes diferentes): {normalized}")
-    log(f"Ja prontos em disco (serao pulados): {len(skipped)}")
+    total = len(pairs)
+    done = len(skipped)
+    log(f"Ja prontos em disco (serao pulados): {done}")
     log(f"Ainda faltam gravar nesta execucao: {len(queue)}")
+    if total:
+        proximo = done + 1 if queue else total
+        log(f"Andamento geral: {done}/{total} ja processados. O proximo entra como {proximo}/{total}.")
     preview = skipped[:15]
     for row in preview:
         log(f"  PULA  {row['saida_nome']}  <=  RGB {row['rgb_nome']}  +  IR {row['ir_nome']}")
     if len(skipped) > len(preview):
         log(f"  ... e mais {len(skipped) - len(preview)} arquivo(s) ja pronto(s). A lista completa esta no CSV.")
     preview_queue = queue[:40]
-    for row in preview_queue:
-        log(f"  FILA  {row['saida_nome']}  <=  RGB {row['rgb_nome']}  +  IR {row['ir_nome']}")
+    for offset, row in enumerate(preview_queue, 1):
+        pos = done + offset
+        log(f"  FILA  [{pos}/{total}] {row['saida_nome']}  <=  RGB {row['rgb_nome']}  +  IR {row['ir_nome']}")
     if len(queue) > len(preview_queue):
         log(f"  ... e mais {len(queue) - len(preview_queue)} na fila. Cada um sera impresso de novo quando comecar.")
-    if normalized:
-        log("Pares com nomes diferentes (confira se a juncao esta certa):")
-        shown = 0
-        for row in pairs:
-            if row["modo_pareamento"] != "nome_normalizado":
-                continue
-            log(f"  NORMALIZADO {row['tile_key']}: RGB={row['rgb_nome']} IR={row['ir_nome']} -> {row['saida_nome']}")
-            shown += 1
-            if shown >= 20:
-                log("  ... demais pares normalizados estao no CSV, coluna modo_pareamento.")
-                break
 
 
 def _print_leftovers(rows: list[dict[str, str]]) -> None:
     groups = {
         "rgb_sem_ir": "RGB sem IR correspondente",
         "ir_sem_rgb": "IR sem RGB correspondente",
+        "anomalia": "Anomalias (cenario 5)",
         "duplicata_ignorada": "Duplicatas ignoradas",
         "conflito_saida": "Conflitos de nome de saida",
     }
@@ -1457,15 +1646,22 @@ def _run_queue(
     gdal_threads: int,
     cache_mb: int,
     nir_band: int,
+    already_done: int,
+    grand_total: int,
 ) -> str:
-    """Fuse the queue. Returns 'ok', 'falha' or 'interrompido'."""
+    """Fuse the queue. Returns 'ok', 'falha' or 'interrompido'.
+
+    ``already_done`` tiles are already on disk. The counter shown to the user
+    is ``already_done + position`` over ``grand_total``, so a resumed run that
+    finished 50 of 9000 starts at 51/9000.
+    """
     total = len(queue)
     started = time.time()
     written = 0
     failed = 0
     outcome = "ok"
 
-    def remember(row: dict[str, str], result: dict) -> None:
+    def remember(row: dict[str, str], result: dict, position: int) -> None:
         nonlocal written, failed
         apply_result(row, result, run_id=run_id, out_dir=out_dir)
         if result["status"] == "ok":
@@ -1481,7 +1677,8 @@ def _run_queue(
         else:
             eta_txt = "calculando"
         log(
-            f"Progresso {done}/{total} | gravados {written} | falhas {failed} | "
+            f"Progresso {position}/{grand_total} | nesta execucao {done}/{total} | "
+            f"gravados {written} | falhas {failed} | "
             f"restam na fila {total - done} | ETA {eta_txt} | decorrido {fmt_duration(elapsed)}"
         )
         log(f"CSV atualizado: {out_dir / SUMMARY_NAME}")
@@ -1494,7 +1691,8 @@ def _run_queue(
 
     if workers == 1:
         for index, row in enumerate(queue, 1):
-            prefix = f"[{index}/{total}] {row['tile_key']}"
+            position = already_done + index
+            prefix = f"[{position}/{grand_total}] {row['saida_nome']}"
             row["status"] = "pendente"
             row["inicio_utc"] = utc_now()
             row["notas"] = ""
@@ -1519,15 +1717,18 @@ def _run_queue(
                 log("Interrompido pelo usuario. O que ja estava pronto foi mantido.")
                 log("Rode o .bat de novo para continuar do que falta.")
                 return "interrompido"
-            remember(row, result)
+            remember(row, result, position)
         return "falha" if failed else "ok"
 
     log(f"Fila paralela com {workers} processos. As linhas de tiles diferentes vao se misturar; cada uma traz o id do tile.")
     jobs = []
+    positions: dict[int, int] = {}
     for index, row in enumerate(queue, 1):
         row["inicio_utc"] = utc_now()
         row["notas"] = ""
-        prefix = f"[{index}/{total}] {row['tile_key']}"
+        position = already_done + index
+        positions[id(row)] = position
+        prefix = f"[{position}/{grand_total}] {row['saida_nome']}"
         jobs.append(
             (
                 row,
@@ -1555,7 +1756,7 @@ def _run_queue(
                     "detalhe": f"{type(exc).__name__}: {exc}",
                     "duracao_segundos": "",
                 }
-            remember(row, result)
+            remember(row, result, positions.get(id(row), already_done + written + failed))
     except KeyboardInterrupt:
         log("Interrompido pelo usuario. Pedindo para os processos pararem.")
         try:
@@ -1580,8 +1781,9 @@ def _print_final(rows: list[dict[str, str]], out_dir: Path, started: float) -> N
     missing = sum(1 for row in summary_pairs if row["status"] in {"pendente", "falha", "interrompido"})
     log("=" * 78)
     log("FIM DESTA EXECUCAO")
-    log(f"Pares prontos no disco: {ready}")
+    log(f"Pares prontos no disco: {ready}/{len(summary_pairs) or 0}")
     log(f"Ainda faltam gravar:   {missing}")
+    _print_scenario_audit(rows)
     log(f"Duracao desta execucao: {fmt_duration(time.time() - started)}")
     log(f"Resumo (abra no Excel): {out_dir / SUMMARY_NAME}")
     log(f"Registro tile a tile:   {out_dir / REGISTRY_NAME}")
@@ -1690,6 +1892,7 @@ def main(argv: list[str] | None = None) -> int:
             row["notas"] = compose_note(row, out_dir)
 
         _print_pair_plan(pairing.pairs, queue, skipped)
+        _print_scenario_audit(all_rows)
         _print_leftovers(all_rows)
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
         log("CSV inicial gravado, antes de comecar a fundir. Da para abrir o resumo enquanto roda (melhor copiar o arquivo).")
@@ -1709,7 +1912,12 @@ def main(argv: list[str] | None = None) -> int:
             _print_final(all_rows, out_dir, started)
             return 0
 
-        log(f"Comecando a gravar {len(queue)} tile(s).")
+        proximo = len(skipped) + 1
+        log(
+            f"Comecando a gravar {len(queue)} tile(s). "
+            f"Contador: {proximo}/{len(pairing.pairs)} "
+            f"({len(skipped)} ja estavam em disco)."
+        )
         outcome = _run_queue(
             queue,
             workers=workers,
@@ -1721,6 +1929,8 @@ def main(argv: list[str] | None = None) -> int:
             gdal_threads=gdal_threads,
             cache_mb=int(args.cache_mb),
             nir_band=int(args.nir_band),
+            already_done=len(skipped),
+            grand_total=len(pairing.pairs),
         )
         _print_final(all_rows, out_dir, started)
         if outcome == "interrompido":
