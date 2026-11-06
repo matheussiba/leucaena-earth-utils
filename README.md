@@ -34,7 +34,8 @@ Initial scripts were reorganized from a local `scripts` folder into the layout b
   ```
 
   Currently used by `python/scripts/transferir_laz_rgb_ir_v3_por_aoi.py`
-  (`geopandas`, `shapely`, `pyogrio`).
+  (`geopandas`, `shapely`, `pyogrio`) and
+  `python/scripts/build_rgbnir_from_rgb_ir.py` (`rasterio`).
 
   > Older segmentation-specific scripts that used to live here
   > (`copy_aerial_tiles_*`, `build_4band_rgbir_*`, `criar-overviews-qgis.ipynb`)
