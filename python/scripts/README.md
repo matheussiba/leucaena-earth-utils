@@ -16,6 +16,7 @@
 | File | Purpose |
 |:-----|:--------|
 | `transferir_laz_rgb_ir_v3_por_aoi.py` | Copy IGC-SP LAZ/RGB/IR tiles by intersecting any AOI (shp/geojson/gpkg/kml/kmz) with the merged articulation in `data/articulacao_igc_sp/`. Optional coverage GeoPackage output. |
+| `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
 
 ```powershell
 pip install -r ../../requirements.txt
@@ -28,6 +29,15 @@ python transferir_laz_rgb_ir_v3_por_aoi.py `
   --dest "C:\deleteme" `
   --cobertura-out "C:\deleteme\cobertura_baixados.gpkg"
 ```
+
+Lab data-center fusion (double-click the `.bat`, or):
+
+```powershell
+python build_rgbnir_from_rgb_ir.py
+python build_rgbnir_from_rgb_ir.py --dry-run
+```
+
+Defaults are `E:\RGB`, `F:\IR` and `G:\RGBNIR`. A second run skips GeoTIFFs already in the output folder. Open `G:\RGBNIR\rgbnir_summary.csv` for how many tiles are done and how many are still missing.
 
 Older segmentation-pipeline scripts that used to live here were **moved** into the
 sibling repository so that the whole pre-processing chain lives in one place:
