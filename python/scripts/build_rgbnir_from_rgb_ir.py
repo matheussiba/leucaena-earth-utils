@@ -35,6 +35,14 @@ A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
 ``_ORTO_RGB`` / ``_ORTO_IR``, ``_V1``), they are still paired and the
 registry records ``modo_pareamento=nome_normalizado``.
+
+The output filename keeps the RGB family, so several products of the same
+tile can sit together in ``G:\\RGBNIR``:
+
+    SF-22-X.tif                  plain RGB
+    SF-22-X_ORTM_V1.tif          from ORTM_RGB_<ID>_V1.tif
+    SF-22-X_ORTO.tif             from <ID>_ORTO-RGB.tif
+    SF-22-X_ORTO_V2.tif          from <ID>_ORTO-RGB_V2.tif
 """
 
 from __future__ import annotations
@@ -107,7 +115,11 @@ COLUMNS: list[tuple[str, str, str]] = [
     ),
     ("rgb_nome", "Nome do arquivo RGB usado neste par. Vazio se este RGB nao existe.", "SF-23.tif"),
     ("ir_nome", "Nome do arquivo IR usado neste par. Vazio se este IR nao existe.", "SF-23.tif"),
-    ("saida_nome", "Nome do GeoTIFF de 4 bandas em G:\\RGBNIR.", "SF-23.tif"),
+    (
+        "saida_nome",
+        "Nome do GeoTIFF em G:\\RGBNIR. Comum: ID.tif. Familia ORTM: ID_ORTM ou ID_ORTM_V1. Familia ORTO: ID_ORTO ou ID_ORTO_V2. A versao sai do nome do RGB.",
+        "SF-22-X_ORTM_V1.tif",
+    ),
     (
         "modo_pareamento",
         "nome_igual = mesmo nome nas duas pastas; nome_normalizado = so casou depois de tirar prefixo/sufixo IGC; nenhum = sem par.",
@@ -357,14 +369,59 @@ def tile_key_from_filename(filename: str) -> str:
         ORTM_IR_<ID>_V1.tif
         <ID>_ORTO_RGB.tif / <ID>_ORTO-RGB.tif
         <ID>_ORTO_IR.tif  / <ID>_ORTO-IR.tif
+        <ID>_ORTO-RGB_V2.tif
+
+    Version (``_V1``) and the ORTO suffix are removed in either order, so
+    ``<ID>_ORTO-RGB_V2`` still collapses to ``<ID>``.
     """
     stem = Path(filename).stem
     stem = re.sub(r"(?i)^ORTM_RGB_", "", stem)
     stem = re.sub(r"(?i)^ORTM_IR_", "", stem)
-    stem = re.sub(r"(?i)_ORTO[_-]RGB$", "", stem)
-    stem = re.sub(r"(?i)_ORTO[_-]IR$", "", stem)
-    stem = re.sub(r"(?i)_V\d+$", "", stem)
+    previous = None
+    while previous != stem:
+        previous = stem
+        stem = re.sub(r"(?i)_ORTO[_-](?:RGB|IR)$", "", stem)
+        stem = re.sub(r"(?i)_V\d+$", "", stem)
     return stem.strip()
+
+
+def generate_smart_output_name(rgb_filename: str, tile_key: str) -> str:
+    """Nome de saida que preserva a familia e a versao do RGB original.
+
+    O id usado no nome e sempre o id limpo (sem ORTM_RGB_, _ORTO-RGB, _V1).
+    A familia e a versao sao lidas do nome original do RGB:
+
+        SF-22-X.tif                 -> SF-22-X.tif
+        ORTM_RGB_<ID>_V1.tif        -> <ID>_ORTM_V1.tif
+        <ID>_ORTO-RGB.tif           -> <ID>_ORTO.tif
+        <ID>_ORTO-RGB_V2.tif        -> <ID>_ORTO_V2.tif
+    """
+    cleaned = tile_key_from_filename(tile_key)
+    stem = safe_output_stem(cleaned or tile_key)
+    # A versao fica no stem, nao na extensao. Procurar em maiusculas contra
+    # ".tif" minusculo falhava e a saida perdia o _V1.
+    v_match = re.search(r"_(V\d+)$", Path(rgb_filename).stem, re.IGNORECASE)
+    version_suffix = f"_{v_match.group(1).upper()}" if v_match else ""
+    name_upper = rgb_filename.upper()
+    if "ORTM" in name_upper:
+        return f"{stem}_ORTM{version_suffix}.tif"
+    if "ORTO" in name_upper:
+        return f"{stem}_ORTO{version_suffix}.tif"
+    return f"{stem}.tif"
+
+
+def _variant_bucket(hit: RasterHit) -> str:
+    """Separa plain, ORTM e ORTO (e V1/V2) do mesmo tile para nao colidirem."""
+    name_upper = hit.filename.upper()
+    if "ORTM" in name_upper:
+        family = "ORTM"
+    elif "ORTO" in name_upper:
+        family = "ORTO"
+    else:
+        family = "BASE"
+    v_match = re.search(r"_(V\d+)$", Path(hit.filename).stem, re.IGNORECASE)
+    version = v_match.group(1).upper() if v_match else ""
+    return f"{hit.tile_key.casefold()}|{family}|{version}"
 
 
 def safe_output_stem(stem: str) -> str:
@@ -509,8 +566,11 @@ def _row_for_leftover(
 def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing:
     """Pair RGB with IR. Exact filename wins; IGC wrappers are the fallback.
 
-    Two different pairs are never allowed to claim the same output filename.
-    The first claim (exact name first) is kept. The other is ``conflito_saida``.
+    Files that share a tile id but belong to different families (plain, ORTM,
+    ORTO) or versions (V1, V2) are paired separately. The output name keeps
+    that family, so they do not overwrite each other. Two pairs that still
+    produce the same output filename: the first claim wins and the other is
+    ``conflito_saida``.
     """
     rgb_by_name, rgb_dups = _index_by_filename(rgb_hits, "RGB")
     ir_by_name, ir_dups = _index_by_filename(ir_hits, "IR")
@@ -544,7 +604,7 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
     for name_key in exact_names:
         rgb = rgb_by_name[name_key]
         ir = ir_by_name[name_key]
-        output_name = f"{safe_output_stem(Path(rgb.filename).stem)}.tif"
+        output_name = generate_smart_output_name(rgb.filename, Path(rgb.filename).stem)
         claim(_row_for_pair(rgb, ir, match_mode="nome_igual", output_name=output_name))
         used_rgb.add(name_key)
         used_ir.add(name_key)
@@ -556,10 +616,10 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
     ir_by_tile: dict[str, list[RasterHit]] = {}
     for hit in rgb_left.values():
         if hit.tile_key:
-            rgb_by_tile.setdefault(hit.tile_key.casefold(), []).append(hit)
+            rgb_by_tile.setdefault(_variant_bucket(hit), []).append(hit)
     for hit in ir_left.values():
         if hit.tile_key:
-            ir_by_tile.setdefault(hit.tile_key.casefold(), []).append(hit)
+            ir_by_tile.setdefault(_variant_bucket(hit), []).append(hit)
 
     normalized_used_rgb: set[str] = set()
     normalized_used_ir: set[str] = set()
@@ -585,7 +645,7 @@ def pair_rasters(rgb_hits: list[RasterHit], ir_hits: list[RasterHit]) -> Pairing
             continue
         rgb = rgb_group[0]
         ir = ir_group[0]
-        output_name = f"{safe_output_stem(rgb.tile_key)}.tif"
+        output_name = generate_smart_output_name(rgb.filename, rgb.tile_key)
         claim(
             _row_for_pair(
                 rgb,
@@ -1676,6 +1736,21 @@ def main(argv: list[str] | None = None) -> int:
         lock.release()
 
 
+def _mostrar_area_de_trabalho():
+    """Simula o atalho Win+D para mostrar a area de trabalho."""
+    if not sys.platform.startswith("win"):
+        return
+    VK_LWIN = 0x5B
+    VK_D = 0x44
+    KEYEVENTF_KEYUP = 0x0002
+    user32 = ctypes.windll.user32
+    user32.keybd_event(VK_LWIN, 0, 0, 0)
+    user32.keybd_event(VK_D, 0, 0, 0)
+    user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+
+
 if __name__ == "__main__":
+    _mostrar_area_de_trabalho()
     with _KeepAwake():
         sys.exit(main())
