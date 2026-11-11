@@ -33,7 +33,7 @@ tile, so the spreadsheet is useful even if the run is interrupted:
 
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
-``_ORTO_RGB`` / ``_ORTO_IR``, ``_V1``), they are still paired and the
+``ORTO_RGB_`` / ``ORTO_IR_``, ``_ORTO_RGB`` / ``_ORTO_IR``, ``_V1``), they are still paired and the
 registry records ``modo_pareamento=nome_normalizado``.
 
 Several products of the same tile are all kept. For each cleaned tile id
@@ -387,16 +387,19 @@ def tile_key_from_filename(filename: str) -> str:
 
         ORTM_RGB_<ID>_V1.tif
         ORTM_IR_<ID>_V1.tif
+        ORTO_RGB_<ID>.tif
+        ORTO_IR_<ID>.tif
         <ID>_ORTO_RGB.tif / <ID>_ORTO-RGB.tif
         <ID>_ORTO_IR.tif  / <ID>_ORTO-IR.tif
         <ID>_ORTO-RGB_V2.tif
 
     Version (``_V1``) and the ORTO suffix are removed in either order, so
-    ``<ID>_ORTO-RGB_V2`` still collapses to ``<ID>``.
+    ``<ID>_ORTO-RGB_V2`` still collapses to ``<ID>``. The prefix form
+    ``ORTO_RGB_<ID>`` / ``ORTO_IR_<ID>`` collapses to the same id.
     """
     stem = Path(filename).stem
-    stem = re.sub(r"(?i)^ORTM_RGB_", "", stem)
-    stem = re.sub(r"(?i)^ORTM_IR_", "", stem)
+    stem = re.sub(r"(?i)^ORTM_(?:RGB|IR)_", "", stem)
+    stem = re.sub(r"(?i)^ORTO[_-](?:RGB|IR)_", "", stem)
     previous = None
     while previous != stem:
         previous = stem
