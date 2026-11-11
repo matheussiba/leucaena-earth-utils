@@ -39,11 +39,15 @@ registry records ``modo_pareamento=nome_normalizado``.
 Several products of the same tile are all kept. For each cleaned tile id
 the script applies this cascade:
 
-    1. RAW + RAW              -> <ID>.tif
-    2. same family and version-> <ID>_ORTO.tif, <ID>_ORTM_V1.tif, ...
-    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO.tif
-    4. different families     -> <ID>-CEN4-ORTM-ORTO.tif
+    1. RAW + RAW              -> <ID>_resampled.tif
+    2. same family and version-> <ID>_ORTO_resampled.tif, <ID>_ORTM_V1_resampled.tif, ...
+    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO_resampled.tif
+    4. different families     -> <ID>-CEN4-ORTM-ORTO_resampled.tif
     5. nothing left to pair   -> no GeoTIFF; the file is only listed in the CSV
+
+The output grid is always the RGB grid. When the IR origin does not land on
+the same pixels, band 4 is warped with nearest neighbor
+(``rasterio.warp.reproject``). RGB bands are copied unchanged.
 """
 
 from __future__ import annotations
@@ -91,7 +95,7 @@ DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -118,8 +122,8 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("ir_nome", "Nome do arquivo IR usado neste par. Vazio se este IR nao existe.", "SF-23.tif"),
     (
         "saida_nome",
-        "Nome do GeoTIFF. Cenario 1: ID.tif. Cenario 2: ID_ORTO.tif ou ID_ORTM_V1.tif. Cenario 3: ID-CEN3-RAW-ORTO.tif. Cenario 4: ID-CEN4-ORTM-ORTO.tif.",
-        "SF-22-X_ORTM_V1.tif",
+        "Nome do GeoTIFF, sempre com sufixo _resampled. Cenario 1: ID_resampled.tif. Cenario 2: ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif. Cenario 3: ID-CEN3-RAW-ORTO_resampled.tif. Cenario 4: ID-CEN4-ORTM-ORTO_resampled.tif.",
+        "SF-22-X_ORTM_V1_resampled.tif",
     ),
     (
         "cenario",
@@ -432,17 +436,23 @@ def classify_product(filename: str) -> str:
 
 
 def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir: str) -> str:
-    """Filename for cenarios 1-4. Cenario 5 does not write a GeoTIFF."""
+    """Filename for cenarios 1-4. Cenario 5 does not write a GeoTIFF.
+
+    Every product ends in ``_resampled`` so an aligned RGBNIR is not confused
+    with an older file that was rejected when the IR grid did not match.
+    """
     stem = safe_output_stem(tile_id)
     if cenario == 1:
-        return f"{stem}.tif"
-    if cenario == 2:
-        return f"{stem}_{tipo_rgb}.tif"
-    if cenario == 3:
-        return f"{stem}-CEN3-{tipo_rgb}-{tipo_ir}.tif"
-    if cenario == 4:
-        return f"{stem}-CEN4-{tipo_rgb}-{tipo_ir}.tif"
-    raise ValueError(f"cenario sem arquivo de saida: {cenario}")
+        base = stem
+    elif cenario == 2:
+        base = f"{stem}_{tipo_rgb}"
+    elif cenario == 3:
+        base = f"{stem}-CEN3-{tipo_rgb}-{tipo_ir}"
+    elif cenario == 4:
+        base = f"{stem}-CEN4-{tipo_rgb}-{tipo_ir}"
+    else:
+        raise ValueError(f"cenario sem arquivo de saida: {cenario}")
+    return f"{base}_resampled.tif"
 
 
 def safe_output_stem(stem: str) -> str:
@@ -972,10 +982,10 @@ def write_dictionary(path: Path) -> None:
             }
         )
     for code, desc in (
-        ("cenario_1", "Puro com puro. Saida: ID.tif."),
-        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO.tif ou ID_ORTM_V1.tif."),
-        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO.tif."),
-        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO.tif."),
+        ("cenario_1", "Puro com puro. Saida: ID_resampled.tif."),
+        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif."),
+        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO_resampled.tif."),
+        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO_resampled.tif."),
         ("nenhum", "Cenario 5, duplicata ou conflito. Nao houve GeoTIFF para esta linha."),
     ):
         rows.append(
@@ -1076,22 +1086,22 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
         metric(
             "cenario_1_puro_puro",
             sum(1 for row in pairs if row.get("cenario") == "1"),
-            "Cenario 1. Puro do RGB com puro do IR. Saida ID.tif.",
+            "Cenario 1. Puro do RGB com puro do IR. Saida ID_resampled.tif.",
         ),
         metric(
             "cenario_2_mesma_familia",
             sum(1 for row in pairs if row.get("cenario") == "2"),
-            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO.tif ou ID_ORTM_V1.tif.",
+            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif.",
         ),
         metric(
             "cenario_3_puro_com_familia",
             sum(1 for row in pairs if row.get("cenario") == "3"),
-            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR.tif.",
+            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR_resampled.tif.",
         ),
         metric(
             "cenario_4_familias_diferentes",
             sum(1 for row in pairs if row.get("cenario") == "4"),
-            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR.tif.",
+            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR_resampled.tif.",
         ),
         metric(
             "cenario_5_sem_tif",
@@ -1225,6 +1235,54 @@ def _approx_equal_transform(left, right, tol: float = 1e-6) -> bool:
     return all(abs(a - b) <= tol for a, b in zip(tuple(left)[:6], tuple(right)[:6]))
 
 
+def _align_nir_to_rgb_window(ir_src, nir_band: int, window, rgb_transform, rgb_crs, src_nodata, dst_nodata):
+    """Resample one IR window onto the RGB pixel grid with nearest neighbor.
+
+    The destination has the RGB window's width, height and transform. Pixels
+    with the IR NoData value, and pixels outside the IR extent, stay NoData
+    instead of being filled with a made-up reflectance.
+    """
+    import numpy as np
+    from rasterio.warp import Resampling, reproject
+    from rasterio.windows import bounds as window_bounds
+    from rasterio.windows import from_bounds
+    from rasterio.windows import transform as window_transform
+
+    dtype = np.dtype(ir_src.dtypes[nir_band - 1])
+    height = int(window.height)
+    width = int(window.width)
+    dst_transform = window_transform(window, rgb_transform)
+    read_fill = dtype.type(0 if src_nodata is None else src_nodata)
+    hole = dtype.type(0 if dst_nodata is None else dst_nodata)
+    destination = np.full((height, width), hole, dtype=dtype)
+
+    res_x = abs(float(ir_src.transform.a)) or 1.0
+    res_y = abs(float(ir_src.transform.e)) or 1.0
+    left, bottom, right, top = window_bounds(window, rgb_transform)
+    src_window = from_bounds(
+        left - 2 * res_x,
+        bottom - 2 * res_y,
+        right + 2 * res_x,
+        top + 2 * res_y,
+        transform=ir_src.transform,
+    ).round_offsets(op="floor").round_lengths(op="ceil")
+    if int(src_window.width) < 1 or int(src_window.height) < 1:
+        return destination
+    source = ir_src.read(nir_band, window=src_window, boundless=True, fill_value=read_fill)
+    reproject(
+        source=source,
+        destination=destination,
+        src_transform=window_transform(src_window, ir_src.transform),
+        src_crs=ir_src.crs,
+        dst_transform=dst_transform,
+        dst_crs=rgb_crs,
+        resampling=Resampling.nearest,
+        src_nodata=None if src_nodata is None else read_fill,
+        dst_nodata=None if dst_nodata is None else hole,
+    )
+    return destination
+
+
 def fuse_one(job: dict) -> dict:
     """Stack RGB bands 1-3 and IR band 1 into one 4-band GeoTIFF.
 
@@ -1288,18 +1346,8 @@ def fuse_one(job: dict) -> dict:
                     "bandas_ir",
                     f"IR tem {ir_src.count} banda(s); a banda NIR pedida e a {nir_band}.",
                 )
-            if (rgb_src.width, rgb_src.height) != (ir_src.width, ir_src.height):
-                return fail(
-                    "tamanho",
-                    f"RGB {rgb_src.width}x{rgb_src.height} px, IR {ir_src.width}x{ir_src.height} px.",
-                )
-            if rgb_src.crs != ir_src.crs:
-                return fail("crs", f"RGB={rgb_src.crs} IR={ir_src.crs}")
-            if not _approx_equal_transform(rgb_src.transform, ir_src.transform):
-                return fail(
-                    "grade",
-                    f"A grade difere. RGB={tuple(rgb_src.transform)[:6]} IR={tuple(ir_src.transform)[:6]}",
-                )
+            if rgb_src.crs is None or ir_src.crs is None:
+                return fail("crs", f"CRS ausente. RGB={rgb_src.crs} IR={ir_src.crs}")
             rgb_dtype = str(rgb_src.dtypes[0])
             ir_dtype = str(ir_src.dtypes[nir_band - 1])
             if rgb_dtype != ir_dtype:
@@ -1307,36 +1355,71 @@ def fuse_one(job: dict) -> dict:
                     "dtype",
                     f"Tipo de pixel diferente: RGB={rgb_dtype} IR={ir_dtype}. Nao converti para nao alterar o valor.",
                 )
+            same_shape = (rgb_src.width, rgb_src.height) == (ir_src.width, ir_src.height)
+            same_grid = (
+                same_shape
+                and rgb_src.crs == ir_src.crs
+                and _approx_equal_transform(rgb_src.transform, ir_src.transform)
+            )
+            if rgb_src.crs != ir_src.crs:
+                log(
+                    f"{prefix} AVISO: CRS diferente (RGB={rgb_src.crs} IR={ir_src.crs}). "
+                    "O IR sera reprojetado para o CRS e a grade do RGB."
+                )
+            if not same_shape:
+                log(
+                    f"{prefix} Tamanho diferente: RGB {rgb_src.width}x{rgb_src.height} px, "
+                    f"IR {ir_src.width}x{ir_src.height} px. A saida usa o tamanho do RGB."
+                )
+            if not _approx_equal_transform(rgb_src.transform, ir_src.transform):
+                log(
+                    f"{prefix} Origem diferente. RGB={tuple(rgb_src.transform)[:6]} "
+                    f"IR={tuple(ir_src.transform)[:6]}"
+                )
+            out_nodata = rgb_src.nodata if rgb_src.nodata is not None else ir_src.nodata
             if rgb_src.nodata != ir_src.nodata:
                 log(
                     f"{prefix} AVISO: nodata diferente (RGB={rgb_src.nodata} IR={ir_src.nodata}). "
-                    "A saida fica com o nodata do RGB."
+                    f"Buracos do NIR ficam com nodata={out_nodata}."
+                )
+            if out_nodata is None:
+                log(
+                    f"{prefix} AVISO: nem o RGB nem o IR declaram NoData. "
+                    "Area sem cobertura de IR fica 0."
+                )
+            if same_grid:
+                log(f"{prefix} Grade do IR ja coincide com o RGB. NIR copiado sem reamostrar.")
+                alignment_note = "Grade do IR ja coincidia com o RGB; NIR copiado sem reamostrar."
+            else:
+                log(
+                    f"{prefix} Alinhando IR na grade do RGB com nearest neighbor "
+                    f"(rasterio.warp.reproject)."
+                )
+                alignment_note = (
+                    "IR alinhado na grade do RGB com nearest neighbor. "
+                    f"RGB={tuple(rgb_src.transform)[:6]} IR={tuple(ir_src.transform)[:6]}"
                 )
 
             log(
-                f"{prefix} Grade OK: {rgb_src.width}x{rgb_src.height} px | "
-                f"dtype={rgb_dtype} | CRS={rgb_src.crs} | nodata={rgb_src.nodata}"
+                f"{prefix} Referencia RGB: {rgb_src.width}x{rgb_src.height} px | "
+                f"dtype={rgb_dtype} | CRS={rgb_src.crs} | nodata={out_nodata}"
             )
-            log(f"{prefix} Bandas: RGB 1,2,3 -> saida 1,2,3 | IR banda {nir_band} -> saida 4 (NIR).")
+            log(f"{prefix} Bandas: RGB 1,2,3 inalteradas -> saida 1,2,3 | IR banda {nir_band} alinhada -> saida 4 (NIR).")
 
             profile = rgb_src.profile.copy()
             for key in ("photometric", "alpha", "Photometric", "ALPHA"):
                 profile.pop(key, None)
             predictor = 3 if rgb_dtype.startswith("float") else 2
+            tiny = rgb_src.width < 16 or rgb_src.height < 16
             block = min(BLOCK, int(rgb_src.width), int(rgb_src.height))
-            if block >= 16:
-                block = max(16, block - (block % 16))
-            else:
-                block = max(1, block)
+            block = max(16, block - (block % 16)) if block >= 16 else 16
             width_px = str(rgb_src.width)
             height_px = str(rgb_src.height)
             crs_text = str(rgb_src.crs or "")
             profile.update(
                 count=4,
                 driver="GTiff",
-                tiled=True,
-                blockxsize=block,
-                blockysize=block,
+                tiled=not tiny,
                 BIGTIFF="IF_SAFER",
                 NUM_THREADS=gdal_threads,
                 PHOTOMETRIC="RGB",
@@ -1344,6 +1427,13 @@ def fuse_one(job: dict) -> dict:
                 compress=COMPRESS,
                 predictor=predictor,
             )
+            if not tiny:
+                profile.update(blockxsize=block, blockysize=block)
+            else:
+                profile.pop("blockxsize", None)
+                profile.pop("blockysize", None)
+            if out_nodata is not None:
+                profile["nodata"] = out_nodata
 
             log(f"{prefix} Escrevendo blocos de {block}x{block}, compressao {COMPRESS}, predictor {predictor}.")
             block_started = time.time()
@@ -1361,7 +1451,18 @@ def fuse_one(job: dict) -> dict:
                 log(f"{prefix} Blocos a gravar: {total}")
                 for index, window in enumerate(windows, 1):
                     rgb_block = rgb_src.read(indexes=[1, 2, 3], window=window)
-                    nir_block = ir_src.read(nir_band, window=window)
+                    if same_grid:
+                        nir_block = ir_src.read(nir_band, window=window)
+                    else:
+                        nir_block = _align_nir_to_rgb_window(
+                            ir_src,
+                            nir_band,
+                            window,
+                            rgb_src.transform,
+                            rgb_src.crs,
+                            ir_src.nodata,
+                            out_nodata,
+                        )
                     dst.write(rgb_block, [1, 2, 3], window=window)
                     dst.write(nir_block, 4, window=window)
                     if index % step == 0 or index == total:
@@ -1385,6 +1486,8 @@ def fuse_one(job: dict) -> dict:
                     SOURCE_IR_NAME=Path(ir_path).name,
                     IR_NIR_BAND_INDEX=str(nir_band),
                     BAND_INTERPRETATION="band1=Red, band2=Green, band3=Blue, band4=NIR (Undefined; NOT alpha)",
+                    IR_ALIGNMENT="nearest neighbor onto the RGB grid" if not same_grid else "IR grid already matched RGB; copied",
+                    RESAMPLING="nearest" if not same_grid else "none",
                 )
             os.replace(tmp_path, out_path)
             elapsed = time.time() - started
@@ -1392,7 +1495,7 @@ def fuse_one(job: dict) -> dict:
             log(f"{prefix} PRONTO {out_path.name} em {fmt_duration(elapsed)} ({fmt_size(out_size)}).")
             return {
                 "status": "ok",
-                "detalhe": "",
+                "detalhe": alignment_note,
                 "largura_px": width_px,
                 "altura_px": height_px,
                 "crs": crs_text,
@@ -1424,12 +1527,13 @@ def _remove_quiet(path: Path) -> None:
 
 
 def apply_result(row: dict[str, str], result: dict, *, run_id: str, out_dir: Path) -> None:
-    pairing_note = row["detalhe"] if row.get("modo_pareamento") == "nome_normalizado" else ""
+    pairing_note = row.get("detalhe") or ""
     row["status"] = result["status"]
     row["duracao_segundos"] = result.get("duracao_segundos", "")
     row["fim_utc"] = utc_now()
     if result["status"] == "ok":
-        row["detalhe"] = pairing_note
+        alignment_note = result.get("detalhe") or ""
+        row["detalhe"] = " ".join(part for part in (pairing_note, alignment_note) if part)
         row["largura_px"] = result.get("largura_px", "")
         row["altura_px"] = result.get("altura_px", "")
         row["crs"] = result.get("crs", "")
