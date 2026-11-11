@@ -16,7 +16,7 @@
 | File | Purpose |
 |:-----|:--------|
 | `transferir_laz_rgb_ir_v3_por_aoi.py` | Copy IGC-SP LAZ/RGB/IR tiles by intersecting any AOI (shp/geojson/gpkg/kml/kmz) with the merged articulation in `data/articulacao_igc_sp/`. Optional coverage GeoPackage output. |
-| `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. IR is nearest-neighbor resampled onto the RGB grid. Tiles whose header bounds do not intersect the matching layer of `G:\sp-bounds.gpkg` (`epsg31982` or `epsg31983`, no reprojection) are skipped. Output names end in `_resampled.tif`. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
+| `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. IR is nearest-neighbor resampled onto the RGB grid. Tiles whose header bounds do not intersect the matching layer of `G:\sp-bounds.gpkg` (`epsg31982` or `epsg31983`, no reprojection) are skipped. Output names end in `-resampled.tif`. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
 
 ```powershell
 pip install -r ../../requirements.txt

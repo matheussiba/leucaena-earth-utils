@@ -39,10 +39,10 @@ registry records ``modo_pareamento=nome_normalizado``.
 Several products of the same tile are all kept. For each cleaned tile id
 the script applies this cascade:
 
-    1. RAW + RAW              -> <ID>_resampled.tif
-    2. same family and version-> <ID>_ORTO_resampled.tif, <ID>_ORTM_V1_resampled.tif, ...
-    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO_resampled.tif
-    4. different families     -> <ID>-CEN4-ORTM-ORTO_resampled.tif
+    1. RAW + RAW              -> <ID>-resampled.tif
+    2. same family and version-> <ID>_ORTO-resampled.tif, <ID>_ORTM_V1-resampled.tif, ...
+    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO-resampled.tif
+    4. different families     -> <ID>-CEN4-ORTM-ORTO-resampled.tif
     5. nothing left to pair   -> no GeoTIFF; the file is only listed in the CSV
 
 The output grid is always the RGB grid. When the IR origin does not land on
@@ -68,7 +68,7 @@ import socket
 import sys
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,7 +102,7 @@ DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -129,8 +129,8 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("ir_nome", "Nome do arquivo IR usado neste par. Vazio se este IR nao existe.", "SF-23.tif"),
     (
         "saida_nome",
-        "Nome do GeoTIFF, sempre com sufixo _resampled. Cenario 1: ID_resampled.tif. Cenario 2: ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif. Cenario 3: ID-CEN3-RAW-ORTO_resampled.tif. Cenario 4: ID-CEN4-ORTM-ORTO_resampled.tif.",
-        "SF-22-X_ORTM_V1_resampled.tif",
+        "Nome do GeoTIFF, sempre com sufixo -resampled. Cenario 1: ID-resampled.tif. Cenario 2: ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif. Cenario 3: ID-CEN3-RAW-ORTO-resampled.tif. Cenario 4: ID-CEN4-ORTM-ORTO-resampled.tif.",
+        "SF-22-X_ORTM_V1-resampled.tif",
     ),
     (
         "cenario",
@@ -453,7 +453,7 @@ def classify_product(filename: str) -> str:
 def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir: str) -> str:
     """Filename for cenarios 1-4. Cenario 5 does not write a GeoTIFF.
 
-    Every product ends in ``_resampled`` so an aligned RGBNIR is not confused
+    Every product ends in ``-resampled`` so an aligned RGBNIR is not confused
     with an older file that was rejected when the IR grid did not match.
     """
     stem = safe_output_stem(tile_id)
@@ -467,7 +467,7 @@ def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir:
         base = f"{stem}-CEN4-{tipo_rgb}-{tipo_ir}"
     else:
         raise ValueError(f"cenario sem arquivo de saida: {cenario}")
-    return f"{base}_resampled.tif"
+    return f"{base}-resampled.tif"
 
 
 def safe_output_stem(stem: str) -> str:
@@ -638,21 +638,16 @@ def filter_rasters_to_sp(
         "O TIFF entra so pelo retangulo do cabecalho; o estado entra com a geometria completa."
     )
     started = time.time()
-    classified: list[tuple[str, str, str] | None] = [None] * len(hits)
-    done = 0
-    workers = min(8, len(hits))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(_classify_against_sp, hit.path, mask): index for index, hit in enumerate(hits)
-        }
-        for future in as_completed(futures):
-            classified[futures[future]] = future.result()
-            done += 1
-            if done % 500 == 0 or done == len(hits):
-                log(
-                    f"  ... {done}/{len(hits)} {label} conferidos "
-                    f"({fmt_duration(time.time() - started)})"
-                )
+    classified: list[tuple[str, str, str]] = []
+    # One TIFF at a time. Opening GeoTIFFs from several threads crashes GDAL on
+    # Windows with 0xC0000005 (exit code -1073741819). Header reads stay fast.
+    for done, hit in enumerate(hits, 1):
+        classified.append(_classify_against_sp(hit.path, mask))
+        if done % 500 == 0 or done == len(hits):
+            log(
+                f"  ... {done}/{len(hits)} {label} conferidos "
+                f"({fmt_duration(time.time() - started)})"
+            )
     kept: list[RasterHit] = []
     dropped: list[dict[str, str]] = []
     outside = 0
@@ -1149,10 +1144,10 @@ def write_dictionary(path: Path) -> None:
             }
         )
     for code, desc in (
-        ("cenario_1", "Puro com puro. Saida: ID_resampled.tif."),
-        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif."),
-        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO_resampled.tif."),
-        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO_resampled.tif."),
+        ("cenario_1", "Puro com puro. Saida: ID-resampled.tif."),
+        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif."),
+        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO-resampled.tif."),
+        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO-resampled.tif."),
         ("nenhum", "Cenario 5, duplicata ou conflito. Nao houve GeoTIFF para esta linha."),
     ):
         rows.append(
@@ -1253,22 +1248,22 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
         metric(
             "cenario_1_puro_puro",
             sum(1 for row in pairs if row.get("cenario") == "1"),
-            "Cenario 1. Puro do RGB com puro do IR. Saida ID_resampled.tif.",
+            "Cenario 1. Puro do RGB com puro do IR. Saida ID-resampled.tif.",
         ),
         metric(
             "cenario_2_mesma_familia",
             sum(1 for row in pairs if row.get("cenario") == "2"),
-            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO_resampled.tif ou ID_ORTM_V1_resampled.tif.",
+            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif.",
         ),
         metric(
             "cenario_3_puro_com_familia",
             sum(1 for row in pairs if row.get("cenario") == "3"),
-            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR_resampled.tif.",
+            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR-resampled.tif.",
         ),
         metric(
             "cenario_4_familias_diferentes",
             sum(1 for row in pairs if row.get("cenario") == "4"),
-            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR_resampled.tif.",
+            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR-resampled.tif.",
         ),
         metric(
             "cenario_5_sem_tif",
