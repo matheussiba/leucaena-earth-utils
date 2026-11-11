@@ -53,7 +53,9 @@ Only tiles that intersect Sao Paulo are fused. The state polygons come from
 ``G:\\sp-bounds.gpkg``, already split into two layers: ``epsg31982`` and
 ``epsg31983``. A TIFF is compared with the layer of the same EPSG. The script
 does not reproject that polygon. Each TIFF is tested by its header bounds,
-not by its pixels.
+not by its pixels. That result is stored in ``rgbnir_sp_vistoria.csv`` and
+reused on the next run. Set ``FORCE_SP_VISTORIA = True`` or pass ``--force-sp``
+to compare every TIFF again.
 """
 
 from __future__ import annotations
@@ -91,6 +93,10 @@ DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
 DEFAULT_SP_BOUNDS = r"G:\sp-bounds.gpkg"
 
+# False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
+# True compares every RGB and IR against Sao Paulo again.
+FORCE_SP_VISTORIA = False
+
 IR_NIR_BAND_INDEX = 1
 RASTER_SUFFIXES = (".tif", ".tiff")
 TMP_SUFFIX = ".tmp.tif"
@@ -99,10 +105,11 @@ LOCK_NAME = "rgbnir_running.lock"
 SUMMARY_NAME = "rgbnir_summary.csv"
 REGISTRY_NAME = "rgbnir_registry.csv"
 DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
+SP_VISTORIA_NAME = "rgbnir_sp_vistoria.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -627,33 +634,180 @@ def _classify_against_sp(path: str, mask: SpBounds) -> tuple[str, str, str]:
     return "fora_de_sp", crs_text, f"Nao intersecta o limite de Sao Paulo ({crs_text})."
 
 
+_SP_VISTORIA_COLUMNS = ["caminho", "lado", "tamanho", "status", "crs", "detalhe"]
+_SP_VISTORIA_STATUS = {"dentro", "fora_de_sp", "sem_localizacao"}
+
+
+def _store_sp_vistoria(
+    cache: dict[str, dict[str, str]],
+    path: str,
+    lado: str,
+    tamanho: str,
+    status: str,
+    crs_text: str,
+    detalhe: str,
+) -> None:
+    key = path.casefold()
+    current = cache.get(key)
+    if current and current.get("status") in {"fora_de_sp", "sem_localizacao"} and status == "dentro":
+        return
+    cache[key] = {
+        "caminho": path,
+        "lado": lado,
+        "tamanho": tamanho,
+        "status": status,
+        "crs": crs_text,
+        "detalhe": detalhe,
+    }
+
+
+def load_sp_vistoria(path: Path) -> dict[str, dict[str, str]]:
+    """Previous inside/outside results, keyed by the source TIFF path."""
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            cache: dict[str, dict[str, str]] = {}
+            for row in csv.DictReader(handle):
+                caminho = (row.get("caminho") or "").strip()
+                status = (row.get("status") or "").strip()
+                if caminho and status in _SP_VISTORIA_STATUS:
+                    _store_sp_vistoria(
+                        cache,
+                        caminho,
+                        (row.get("lado") or "").strip(),
+                        (row.get("tamanho") or "").strip(),
+                        status,
+                        (row.get("crs") or "").strip(),
+                        (row.get("detalhe") or "").strip(),
+                    )
+            return cache
+    except OSError as exc:
+        log(f"AVISO: nao li a vistoria salva {path}: {exc}")
+        return {}
+
+
+def save_sp_vistoria(path: Path, cache: dict[str, dict[str, str]], hits: list[RasterHit]) -> None:
+    rows = []
+    for hit in hits:
+        saved = cache.get(hit.path.casefold())
+        if saved:
+            rows.append(saved)
+    rows.sort(key=lambda row: (row.get("lado", ""), row.get("caminho", "").casefold()))
+    if write_csv_atomic(path, _SP_VISTORIA_COLUMNS, rows):
+        log(f"Vistoria de SP salva: {path} ({len(rows)} arquivo(s)).")
+
+
+def vistoria_from_registry(out_dir: Path) -> dict[str, dict[str, str]]:
+    """Rebuild the SP cache from a registry written after a finished inspection.
+
+    The summary metric ``fora_de_sp`` exists only once that inspection has been
+    published. Older registries, from before the state filter, are ignored.
+    """
+    summary = out_dir / SUMMARY_NAME
+    registry = out_dir / REGISTRY_NAME
+    if not summary.is_file() or not registry.is_file():
+        return {}
+    try:
+        with summary.open("r", encoding="utf-8-sig", newline="") as handle:
+            inspected = any((row.get("metrica") or "") == "fora_de_sp" for row in csv.DictReader(handle))
+    except OSError as exc:
+        log(f"AVISO: nao li {summary}: {exc}")
+        return {}
+    if not inspected:
+        return {}
+    cache: dict[str, dict[str, str]] = {}
+    try:
+        with registry.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                status = (row.get("status") or "").strip()
+                if status in {"fora_de_sp", "sem_localizacao"}:
+                    if row.get("rgb_caminho"):
+                        _store_sp_vistoria(
+                            cache, row["rgb_caminho"], "rgb", row.get("rgb_bytes") or "",
+                            status, row.get("crs") or "", row.get("detalhe") or "",
+                        )
+                    elif row.get("ir_caminho"):
+                        _store_sp_vistoria(
+                            cache, row["ir_caminho"], "ir", row.get("ir_bytes") or "",
+                            status, row.get("crs") or "", row.get("detalhe") or "",
+                        )
+                    continue
+                if row.get("rgb_caminho"):
+                    _store_sp_vistoria(cache, row["rgb_caminho"], "rgb", row.get("rgb_bytes") or "", "dentro", "", "")
+                if row.get("ir_caminho"):
+                    _store_sp_vistoria(cache, row["ir_caminho"], "ir", row.get("ir_bytes") or "", "dentro", "", "")
+    except OSError as exc:
+        log(f"AVISO: nao li {registry}: {exc}")
+        return {}
+    return cache
+
+
+def _saved_sp_result(cache: dict[str, dict[str, str]], hit: RasterHit, force: bool) -> dict[str, str] | None:
+    if force:
+        return None
+    saved = cache.get(hit.path.casefold())
+    if not saved or saved.get("status") not in _SP_VISTORIA_STATUS:
+        return None
+    tamanho = saved.get("tamanho") or ""
+    if tamanho and tamanho != str(hit.size):
+        return None
+    return saved
+
+
+def sp_vistoria_has_new_files(hits: list[RasterHit], cache: dict[str, dict[str, str]], force: bool) -> bool:
+    if force:
+        return True
+    return any(_saved_sp_result(cache, hit, False) is None for hit in hits)
+
+
 def filter_rasters_to_sp(
-    hits: list[RasterHit], mask: SpBounds, *, label: str, rgb: bool
+    hits: list[RasterHit],
+    mask: SpBounds | None,
+    cache: dict[str, dict[str, str]],
+    *,
+    label: str,
+    rgb: bool,
+    force: bool,
 ) -> tuple[list[RasterHit], list[dict[str, str]]]:
-    """Drop rasters whose header bounds do not intersect Sao Paulo."""
+    """Drop rasters whose header bounds do not intersect Sao Paulo.
+
+    Results already stored in ``cache`` are reused. Only a new file, a file
+    whose size changed, or ``force=True`` opens the TIFF header.
+    """
     if not hits:
         return [], []
-    log(
-        f"Comparando {len(hits)} {label} com o poligono de Sao Paulo. "
-        "O TIFF entra so pelo retangulo do cabecalho; o estado entra com a geometria completa."
-    )
-    started = time.time()
-    classified: list[tuple[str, str, str]] = []
-    # One TIFF at a time. Opening GeoTIFFs from several threads crashes GDAL on
-    # Windows with 0xC0000005 (exit code -1073741819). Header reads stay fast.
-    for done, hit in enumerate(hits, 1):
-        classified.append(_classify_against_sp(hit.path, mask))
-        if done % 500 == 0 or done == len(hits):
-            log(
-                f"  ... {done}/{len(hits)} {label} conferidos "
-                f"({fmt_duration(time.time() - started)})"
-            )
+    lado = "rgb" if rgb else "ir"
+    pending = [hit for hit in hits if _saved_sp_result(cache, hit, force) is None]
+    reused = len(hits) - len(pending)
+    if pending:
+        if mask is None:
+            raise RuntimeError("A vistoria de SP precisa do limite, mas ele nao foi carregado.")
+        log(
+            f"Comparando {len(pending)} {label} novo(s) com o poligono de Sao Paulo. "
+            f"{reused} ja estavam na vistoria salva."
+        )
+        started = time.time()
+        # One TIFF at a time. Opening GeoTIFFs from several threads crashes GDAL on
+        # Windows with 0xC0000005 (exit code -1073741819).
+        for done, hit in enumerate(pending, 1):
+            status, crs_text, detail = _classify_against_sp(hit.path, mask)
+            _store_sp_vistoria(cache, hit.path, lado, str(hit.size), status, crs_text, detail)
+            if done % 500 == 0 or done == len(pending):
+                log(
+                    f"  ... {done}/{len(pending)} {label} conferidos "
+                    f"({fmt_duration(time.time() - started)})"
+                )
+    else:
+        log(f"{label}: {reused} arquivo(s) reaproveitados da vistoria de SP. Nenhum cabecalho foi aberto.")
+
     kept: list[RasterHit] = []
     dropped: list[dict[str, str]] = []
     outside = 0
     unknown = 0
-    for hit, item in zip(hits, classified):
-        status, crs_text, detail = item or ("sem_localizacao", "", "sem resultado")
+    for hit in hits:
+        saved = cache.get(hit.path.casefold()) or {"status": "sem_localizacao", "crs": "", "detalhe": "sem resultado"}
+        status = saved.get("status") or "sem_localizacao"
         if status == "dentro":
             kept.append(hit)
             continue
@@ -663,12 +817,14 @@ def filter_rasters_to_sp(
         else:
             unknown += 1
             kind = "sem_localizacao"
-        row = _row_for_leftover(hit, kind=kind, status=status, detail=detail, rgb=rgb, cenario="", tipo="")
-        row["crs"] = crs_text
+        row = _row_for_leftover(
+            hit, kind=kind, status=status, detail=saved.get("detalhe") or "", rgb=rgb, cenario="", tipo=""
+        )
+        row["crs"] = saved.get("crs") or ""
         dropped.append(row)
     log(
         f"  {label}: {len(kept)} dentro de SP, {outside} fora (ignorados), "
-        f"{unknown} sem localizacao (ignorados), em {fmt_duration(time.time() - started)}."
+        f"{unknown} sem localizacao (ignorados)."
     )
     return kept, dropped
 
@@ -1741,6 +1897,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--force-sp",
+        action="store_true",
+        help=(
+            "Refaz a vistoria de Sao Paulo em todos os TIFF. "
+            "Sem esta opcao, e com FORCE_SP_VISTORIA = False, o resultado salvo e reaproveitado."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -1790,6 +1954,10 @@ def _print_banner(args: argparse.Namespace, run_id: str, gdal_threads: int) -> N
     log(f"IR      -> {args.ir}")
     log(f"Saida   -> {args.out}")
     log(f"Limite SP -> {args.sp_bounds}")
+    if FORCE_SP_VISTORIA or args.force_sp:
+        log("Vistoria SP -> FORCADA. Todos os TIFF serao comparados de novo.")
+    else:
+        log(f"Vistoria SP -> reaproveita {Path(args.out) / SP_VISTORIA_NAME} se ele ja existir.")
     log(f"Resumo  -> {Path(args.out) / SUMMARY_NAME}")
     log(f"Registro-> {Path(args.out) / REGISTRY_NAME}")
     log(f"Dicionario -> {Path(args.out) / DICTIONARY_NAME}")
@@ -2152,29 +2320,60 @@ def main(argv: list[str] | None = None) -> int:
         log(f"Dicionario: {out_dir / DICTIONARY_NAME}")
 
         sp_path = Path(args.sp_bounds)
-        if not sp_path.is_file():
-            log(f"ABORTADO: limite de Sao Paulo nao encontrado: {sp_path}")
-            return 2
-        if rasterio is None:
-            log("ABORTADO: preciso do rasterio para ler o retangulo de cada TIFF e comparar com SP.")
-            return 2
-        try:
-            sp_mask = SpBounds(sp_path)
-        except Exception as exc:  # noqa: BLE001
-            log(f"ABORTADO: nao li o limite de Sao Paulo ({sp_path}): {type(exc).__name__}: {exc}")
-            return 2
+        force_sp = FORCE_SP_VISTORIA or args.force_sp
+        vistoria_path = out_dir / SP_VISTORIA_NAME
+        if force_sp:
+            sp_cache = {}
+            log("Vistoria de SP forcada. Todos os TIFF serao comparados de novo.")
+        else:
+            sp_cache = load_sp_vistoria(vistoria_path)
+            if sp_cache:
+                log(f"Vistoria de SP encontrada: {len(sp_cache)} arquivo(s) em {vistoria_path}.")
+            else:
+                sp_cache = vistoria_from_registry(out_dir)
+                if sp_cache:
+                    log(
+                        f"Vistoria de SP recuperada do registro anterior: {len(sp_cache)} arquivo(s). "
+                        "Os cabecalhos nao serao reabertos."
+                    )
+                else:
+                    log("Nenhuma vistoria de SP salva. Esta execucao abre o cabecalho de cada TIFF uma vez.")
 
-        rgb_hits = scan_rasters(rgb_dir)
-        ir_hits = scan_rasters(ir_dir)
-        if not rgb_hits:
+        rgb_all = scan_rasters(rgb_dir)
+        ir_all = scan_rasters(ir_dir)
+        if not rgb_all:
             log(f"ABORTADO: nenhum .tif/.tiff em {rgb_dir}")
             return 2
-        if not ir_hits:
+        if not ir_all:
             log(f"ABORTADO: nenhum .tif/.tiff em {ir_dir}")
             return 2
 
-        rgb_hits, rgb_outside = filter_rasters_to_sp(rgb_hits, sp_mask, label="RGB", rgb=True)
-        ir_hits, ir_outside = filter_rasters_to_sp(ir_hits, sp_mask, label="IR", rgb=False)
+        need_sp = sp_vistoria_has_new_files(rgb_all, sp_cache, force_sp) or sp_vistoria_has_new_files(
+            ir_all, sp_cache, force_sp
+        )
+        sp_mask = None
+        if need_sp:
+            if not sp_path.is_file():
+                log(f"ABORTADO: limite de Sao Paulo nao encontrado: {sp_path}")
+                return 2
+            if rasterio is None:
+                log("ABORTADO: preciso do rasterio para ler o retangulo de cada TIFF e comparar com SP.")
+                return 2
+            try:
+                sp_mask = SpBounds(sp_path)
+            except Exception as exc:  # noqa: BLE001
+                log(f"ABORTADO: nao li o limite de Sao Paulo ({sp_path}): {type(exc).__name__}: {exc}")
+                return 2
+        else:
+            log("Nenhum TIFF novo ou com tamanho diferente. A vistoria de SP nao sera refeita.")
+
+        rgb_hits, rgb_outside = filter_rasters_to_sp(
+            rgb_all, sp_mask, sp_cache, label="RGB", rgb=True, force=force_sp
+        )
+        ir_hits, ir_outside = filter_rasters_to_sp(
+            ir_all, sp_mask, sp_cache, label="IR", rgb=False, force=force_sp
+        )
+        save_sp_vistoria(vistoria_path, sp_cache, rgb_all + ir_all)
         if not rgb_hits or not ir_hits:
             dropped = rgb_outside + ir_outside
             for row in dropped:
