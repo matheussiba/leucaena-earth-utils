@@ -48,6 +48,12 @@ the script applies this cascade:
 The output grid is always the RGB grid. When the IR origin does not land on
 the same pixels, band 4 is warped with nearest neighbor
 (``rasterio.warp.reproject``). RGB bands are copied unchanged.
+
+Only tiles that intersect Sao Paulo are fused. The state polygons come from
+``G:\\sp-bounds.gpkg``, already split into two layers: ``epsg31982`` and
+``epsg31983``. A TIFF is compared with the layer of the same EPSG. The script
+does not reproject that polygon. Each TIFF is tested by its header bounds,
+not by its pixels.
 """
 
 from __future__ import annotations
@@ -62,7 +68,7 @@ import socket
 import sys
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +89,7 @@ except ImportError:  # checked again in main(); matching logic stays importable
 DEFAULT_RGB_DIR = r"E:\RGB"
 DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
+DEFAULT_SP_BOUNDS = r"G:\sp-bounds.gpkg"
 
 IR_NIR_BAND_INDEX = 1
 RASTER_SUFFIXES = (".tif", ".tiff")
@@ -95,7 +102,7 @@ DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -208,6 +215,14 @@ STATUS_HELP: list[tuple[str, str]] = [
     (
         "conflito_saida",
         "Dois pares diferentes produziriam o mesmo nome em G:\\RGBNIR. Este nao foi gravado, para nao sobrescrever o outro.",
+    ),
+    (
+        "fora_de_sp",
+        "O retangulo do raster nao intersecta o limite de Sao Paulo. Nao entra no pareamento nem na fusao.",
+    ),
+    (
+        "sem_localizacao",
+        "Nao deu para ler o CRS ou o retangulo do raster, entao ele nao foi comparado com Sao Paulo e ficou de fora.",
     ),
 ]
 
@@ -517,6 +532,150 @@ def scan_rasters(folder: Path) -> list[RasterHit]:
         f"em {fmt_duration(time.time() - started)}."
     )
     return found
+
+
+# Layer name in G:\sp-bounds.gpkg -> the EPSG the layer is already stored in.
+# The script never reprojects these polygons.
+_SP_LAYER_BY_EPSG = {31982: "epsg31982", 31983: "epsg31983"}
+
+
+class SpBounds:
+    """Sao Paulo polygons, one layer per TIFF CRS, used without reprojection.
+
+    ``epsg31982`` is crossed only with rasters in EPSG:31982. ``epsg31983`` is
+    crossed only with rasters in EPSG:31983. The geometry kept is the full
+    layer polygon, not its bounding rectangle.
+    """
+
+    def __init__(self, path: Path):
+        import geopandas as gpd
+        from pyproj import CRS
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
+
+        log(f"Lendo o limite de Sao Paulo: {path}")
+        listed = gpd.list_layers(path)
+        available = {str(name).casefold(): str(name) for name in listed["name"]}
+        self.path = path
+        self._by_epsg: dict[int, tuple] = {}
+        missing: list[str] = []
+        for epsg, layer_name in _SP_LAYER_BY_EPSG.items():
+            actual = available.get(layer_name.casefold())
+            if actual is None:
+                missing.append(layer_name)
+                continue
+            gdf = gpd.read_file(path, layer=actual)
+            if gdf.empty or gdf.crs is None:
+                raise ValueError(f"A camada {actual} nao tem geometria ou CRS.")
+            if not CRS.from_user_input(gdf.crs).equals(CRS.from_epsg(epsg)):
+                raise ValueError(
+                    f"A camada {actual} esta em {gdf.crs}, e o esperado e EPSG:{epsg}. "
+                    "O script nao converte o limite; grave a camada nesse EPSG."
+                )
+            geom = unary_union(gdf.geometry.to_list())
+            if geom is None or geom.is_empty:
+                raise ValueError(f"A camada {actual} ficou vazia.")
+            self._by_epsg[epsg] = (prep(geom), tuple(geom.bounds))
+            log(
+                f"  Camada {actual}: EPSG:{epsg}, {len(gdf)} feicao(oes), "
+                "geometria completa, sem conversao."
+            )
+        if missing:
+            found = ", ".join(sorted(available)) or "(nenhuma)"
+            raise ValueError(
+                f"Faltam as camadas {', '.join(missing)} em {path}. Camadas encontradas: {found}."
+            )
+
+    def for_epsg(self, epsg: int | None):
+        if epsg is None:
+            return None
+        return self._by_epsg.get(int(epsg))
+
+
+def _bounds_overlap(raster_bounds: tuple[float, float, float, float], envelope: tuple[float, float, float, float]) -> bool:
+    left, bottom, right, top = raster_bounds
+    env_left, env_bottom, env_right, env_top = envelope
+    return not (right < env_left or left > env_right or top < env_bottom or bottom > env_top)
+
+
+def _classify_against_sp(path: str, mask: SpBounds) -> tuple[str, str, str]:
+    """Return (dentro|fora_de_sp|sem_localizacao, crs, detalhe). Header only."""
+    from shapely.geometry import box
+
+    try:
+        with rasterio.open(path) as src:
+            if src.crs is None:
+                return "sem_localizacao", "", "CRS ausente; nao da para saber se cai em Sao Paulo."
+            epsg = src.crs.to_epsg()
+            crs_text = f"EPSG:{epsg}" if epsg else src.crs.to_string()
+            bounds = (float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top))
+    except Exception as exc:  # noqa: BLE001
+        return "sem_localizacao", "", f"Nao abri o cabecalho: {type(exc).__name__}: {exc}"
+    packed = mask.for_epsg(epsg)
+    if packed is None:
+        return (
+            "sem_localizacao",
+            crs_text,
+            f"CRS {crs_text} nao tem camada correspondente. "
+            "O cruzamento usa epsg31982 ou epsg31983, sem converter o limite.",
+        )
+    prepared, envelope = packed
+    if not _bounds_overlap(bounds, envelope):
+        return "fora_de_sp", crs_text, f"Retangulo fora do envelope de Sao Paulo ({crs_text})."
+    if prepared.intersects(box(*bounds)):
+        return "dentro", crs_text, ""
+    return "fora_de_sp", crs_text, f"Nao intersecta o limite de Sao Paulo ({crs_text})."
+
+
+def filter_rasters_to_sp(
+    hits: list[RasterHit], mask: SpBounds, *, label: str, rgb: bool
+) -> tuple[list[RasterHit], list[dict[str, str]]]:
+    """Drop rasters whose header bounds do not intersect Sao Paulo."""
+    if not hits:
+        return [], []
+    log(
+        f"Comparando {len(hits)} {label} com o poligono de Sao Paulo. "
+        "O TIFF entra so pelo retangulo do cabecalho; o estado entra com a geometria completa."
+    )
+    started = time.time()
+    classified: list[tuple[str, str, str] | None] = [None] * len(hits)
+    done = 0
+    workers = min(8, len(hits))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_classify_against_sp, hit.path, mask): index for index, hit in enumerate(hits)
+        }
+        for future in as_completed(futures):
+            classified[futures[future]] = future.result()
+            done += 1
+            if done % 500 == 0 or done == len(hits):
+                log(
+                    f"  ... {done}/{len(hits)} {label} conferidos "
+                    f"({fmt_duration(time.time() - started)})"
+                )
+    kept: list[RasterHit] = []
+    dropped: list[dict[str, str]] = []
+    outside = 0
+    unknown = 0
+    for hit, item in zip(hits, classified):
+        status, crs_text, detail = item or ("sem_localizacao", "", "sem resultado")
+        if status == "dentro":
+            kept.append(hit)
+            continue
+        if status == "fora_de_sp":
+            outside += 1
+            kind = "fora_de_sp"
+        else:
+            unknown += 1
+            kind = "sem_localizacao"
+        row = _row_for_leftover(hit, kind=kind, status=status, detail=detail, rgb=rgb, cenario="", tipo="")
+        row["crs"] = crs_text
+        dropped.append(row)
+    log(
+        f"  {label}: {len(kept)} dentro de SP, {outside} fora (ignorados), "
+        f"{unknown} sem localizacao (ignorados), em {fmt_duration(time.time() - started)}."
+    )
+    return kept, dropped
 
 
 def _index_by_filename(
@@ -902,6 +1061,12 @@ def compose_note(row: dict[str, str], out_dir: Path) -> str:
         return row["detalhe"]
     if status == "conflito_saida":
         return row["detalhe"]
+    if status == "fora_de_sp":
+        nome = row["rgb_nome"] or row["ir_nome"] or row["tile_key"]
+        return f"Ignorado, fora de Sao Paulo: '{nome}'. {row['detalhe']}".strip()
+    if status == "sem_localizacao":
+        nome = row["rgb_nome"] or row["ir_nome"] or row["tile_key"]
+        return f"Ignorado, sem localizacao: '{nome}'. {row['detalhe']}".strip()
     return row["detalhe"]
 
 
@@ -919,6 +1084,8 @@ _STATUS_ORDER = {
     "sem_par": 6,
     "anomalia": 7,
     "duplicata_ignorada": 8,
+    "fora_de_sp": 9,
+    "sem_localizacao": 10,
 }
 
 _PRESERVE_FROM_PREVIOUS = (
@@ -1042,7 +1209,7 @@ def sort_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return sorted(
         rows,
         key=lambda row: (
-            _STATUS_ORDER.get(row.get("status", ""), 9),
+            _STATUS_ORDER.get(row.get("status", ""), 99),
             row.get("tile_key", "").casefold(),
             row.get("rgb_nome", "").casefold(),
             row.get("ir_nome", "").casefold(),
@@ -1107,6 +1274,16 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
             "cenario_5_sem_tif",
             sum(1 for row in rows if row.get("cenario") == "5"),
             "Cenario 5. Arquivos que nao formaram par. Nenhum tif foi gerado para eles.",
+        ),
+        metric(
+            "fora_de_sp",
+            sum(1 for row in rows if row.get("status") == "fora_de_sp"),
+            "Rasters cujo retangulo nao intersecta Sao Paulo. Foram ignorados antes do pareamento.",
+        ),
+        metric(
+            "sem_localizacao",
+            sum(1 for row in rows if row.get("status") == "sem_localizacao"),
+            "Rasters sem CRS ou sem retangulo legivel. Foram ignorados porque nao deu para compara-los com SP.",
         ),
         metric(
             "gravados_nesta_execucao",
@@ -1561,6 +1738,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ir", default=DEFAULT_IR_DIR, help=f"Pasta dos IR (padrao: {DEFAULT_IR_DIR})")
     parser.add_argument("--out", default=DEFAULT_OUT_DIR, help=f"Pasta de saida (padrao: {DEFAULT_OUT_DIR})")
     parser.add_argument(
+        "--sp-bounds",
+        default=DEFAULT_SP_BOUNDS,
+        help=(
+            "GeoPackage com as camadas epsg31982 e epsg31983, cada uma ja no seu EPSG. "
+            f"Rasters que nao intersectam a camada do mesmo CRS sao ignorados. Padrao: {DEFAULT_SP_BOUNDS}"
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -1609,6 +1794,7 @@ def _print_banner(args: argparse.Namespace, run_id: str, gdal_threads: int) -> N
     log(f"RGB     -> {args.rgb}")
     log(f"IR      -> {args.ir}")
     log(f"Saida   -> {args.out}")
+    log(f"Limite SP -> {args.sp_bounds}")
     log(f"Resumo  -> {Path(args.out) / SUMMARY_NAME}")
     log(f"Registro-> {Path(args.out) / REGISTRY_NAME}")
     log(f"Dicionario -> {Path(args.out) / DICTIONARY_NAME}")
@@ -1698,6 +1884,10 @@ def _print_scenario_audit(rows: list[dict[str, str]]) -> None:
     log(f"  {rgb_sem} arquivos RGB sem IR")
     log(f"  {ir_sem} arquivos IR sem RGB")
     log(f"  {anomalias} anomalias (tipo repetido ou nome sem id)")
+    fora = sum(1 for row in rows if row.get("status") == "fora_de_sp")
+    sem_loc = sum(1 for row in rows if row.get("status") == "sem_localizacao")
+    log(f"  {fora} arquivos fora de Sao Paulo (ignorados)")
+    log(f"  {sem_loc} arquivos sem localizacao (ignorados)")
 
 
 def _print_pair_plan(pairs: list[dict[str, str]], queue: list[dict[str, str]], skipped: list[dict[str, str]]) -> None:
@@ -1728,6 +1918,8 @@ def _print_leftovers(rows: list[dict[str, str]]) -> None:
         "anomalia": "Anomalias (cenario 5)",
         "duplicata_ignorada": "Duplicatas ignoradas",
         "conflito_saida": "Conflitos de nome de saida",
+        "fora_de_sp": "Fora de Sao Paulo (ignorados)",
+        "sem_localizacao": "Sem CRS ou retangulo (ignorados)",
     }
     for kind, title in groups.items():
         items = [row for row in rows if row["tipo_registro"] == kind]
@@ -1964,6 +2156,19 @@ def main(argv: list[str] | None = None) -> int:
         write_dictionary(out_dir / DICTIONARY_NAME)
         log(f"Dicionario: {out_dir / DICTIONARY_NAME}")
 
+        sp_path = Path(args.sp_bounds)
+        if not sp_path.is_file():
+            log(f"ABORTADO: limite de Sao Paulo nao encontrado: {sp_path}")
+            return 2
+        if rasterio is None:
+            log("ABORTADO: preciso do rasterio para ler o retangulo de cada TIFF e comparar com SP.")
+            return 2
+        try:
+            sp_mask = SpBounds(sp_path)
+        except Exception as exc:  # noqa: BLE001
+            log(f"ABORTADO: nao li o limite de Sao Paulo ({sp_path}): {type(exc).__name__}: {exc}")
+            return 2
+
         rgb_hits = scan_rasters(rgb_dir)
         ir_hits = scan_rasters(ir_dir)
         if not rgb_hits:
@@ -1971,6 +2176,21 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if not ir_hits:
             log(f"ABORTADO: nenhum .tif/.tiff em {ir_dir}")
+            return 2
+
+        rgb_hits, rgb_outside = filter_rasters_to_sp(rgb_hits, sp_mask, label="RGB", rgb=True)
+        ir_hits, ir_outside = filter_rasters_to_sp(ir_hits, sp_mask, label="IR", rgb=False)
+        if not rgb_hits or not ir_hits:
+            dropped = rgb_outside + ir_outside
+            for row in dropped:
+                row["run_id_desta_execucao"] = run_id
+                row["notas"] = compose_note(row, out_dir)
+            publish(dropped, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
+            if not rgb_hits:
+                log(f"ABORTADO: nenhum RGB intersecta Sao Paulo ({sp_path}).")
+            else:
+                log(f"ABORTADO: nenhum IR intersecta Sao Paulo ({sp_path}).")
+            log(f"Os ignorados foram listados em {out_dir / REGISTRY_NAME}.")
             return 2
 
         log("Pareando RGB com IR pelo nome do arquivo...")
@@ -1981,7 +2201,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             log("Nao havia registro anterior. Este CSV comeca do zero.")
 
-        all_rows = pairing.all_rows()
+        all_rows = pairing.all_rows() + rgb_outside + ir_outside
         for row in all_rows:
             if row["saida_nome"]:
                 row["saida_caminho"] = str(out_dir / row["saida_nome"])
