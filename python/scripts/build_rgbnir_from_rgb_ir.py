@@ -39,15 +39,16 @@ registry records ``modo_pareamento=nome_normalizado``.
 Several products of the same tile are all kept. For each cleaned tile id
 the script applies this cascade:
 
-    1. RAW + RAW              -> <ID>-resampled.tif
-    2. same family and version-> <ID>_ORTO-resampled.tif, <ID>_ORTM_V1-resampled.tif, ...
-    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO-resampled.tif
-    4. different families     -> <ID>-CEN4-ORTM-ORTO-resampled.tif
+    1. RAW + RAW              -> <ID>.tif
+    2. same family and version-> <ID>_ORTO.tif, <ID>_ORTM_V1.tif, ...
+    3. RAW paired with a family that has no twin -> <ID>-CEN3-RAW-ORTO.tif
+    4. different families     -> <ID>-CEN4-ORTM-ORTO.tif
     5. nothing left to pair   -> no GeoTIFF; the file is only listed in the CSV
 
-The output grid is always the RGB grid. When the IR origin does not land on
-the same pixels, band 4 is warped with nearest neighbor
-(``rasterio.warp.reproject``). RGB bands are copied unchanged.
+The output grid is always the RGB grid. When the IR origin already matches,
+band 4 is copied and the filename stays as above. When the grids differ, band
+4 is warped with nearest neighbor (``rasterio.warp.reproject``) and the
+filename gains ``-resampled`` before the extension (``<ID>-resampled.tif``).
 
 Only tiles that intersect Sao Paulo are fused. The state polygons come from
 ``G:\\sp-bounds.gpkg``, already split into two layers: ``epsg31982`` and
@@ -109,7 +110,7 @@ SP_VISTORIA_NAME = "rgbnir_sp_vistoria.csv"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -136,8 +137,8 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("ir_nome", "Nome do arquivo IR usado neste par. Vazio se este IR nao existe.", "SF-23.tif"),
     (
         "saida_nome",
-        "Nome do GeoTIFF, sempre com sufixo -resampled. Cenario 1: ID-resampled.tif. Cenario 2: ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif. Cenario 3: ID-CEN3-RAW-ORTO-resampled.tif. Cenario 4: ID-CEN4-ORTM-ORTO-resampled.tif.",
-        "SF-22-X_ORTM_V1-resampled.tif",
+        "Nome do GeoTIFF. Cenario 1: ID.tif. Cenario 2: ID_ORTO.tif ou ID_ORTM_V1.tif. Cenario 3: ID-CEN3-RAW-ORTO.tif. Cenario 4: ID-CEN4-ORTM-ORTO.tif. Se a grade do IR diferir da do RGB, o mesmo nome ganha -resampled antes da extensao.",
+        "SF-22-X_ORTM_V1.tif",
     ),
     (
         "cenario",
@@ -458,10 +459,10 @@ def classify_product(filename: str) -> str:
 
 
 def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir: str) -> str:
-    """Filename for cenarios 1-4. Cenario 5 does not write a GeoTIFF.
+    """Filename for cenarios 1-4 when the IR grid already matches the RGB.
 
-    Every product ends in ``-resampled`` so an aligned RGBNIR is not confused
-    with an older file that was rejected when the IR grid did not match.
+    Cenario 5 does not write a GeoTIFF. A grid mismatch does not use this
+    name: ``resampled_output_name`` adds ``-resampled`` at fuse time.
     """
     stem = safe_output_stem(tile_id)
     if cenario == 1:
@@ -474,7 +475,27 @@ def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir:
         base = f"{stem}-CEN4-{tipo_rgb}-{tipo_ir}"
     else:
         raise ValueError(f"cenario sem arquivo de saida: {cenario}")
-    return f"{base}-resampled.tif"
+    return f"{base}.tif"
+
+
+def resampled_output_name(plain_name: str) -> str:
+    """Name used only when the IR grid has to be aligned onto the RGB grid."""
+    path = Path(plain_name)
+    stem = path.stem
+    if stem.endswith("-resampled") or stem.endswith("_resampled"):
+        stem = stem[: -len("-resampled")] if stem.endswith("-resampled") else stem[: -len("_resampled")]
+    return f"{stem}-resampled{path.suffix or '.tif'}"
+
+
+def finished_output(out_dir: Path, plain_name: str) -> Path | None:
+    """An existing final TIFF for this pair, under the plain or resampled name."""
+    plain = out_dir / plain_name
+    resampled = out_dir / resampled_output_name(plain_name)
+    legacy = out_dir / f"{Path(plain_name).stem}_resampled{Path(plain_name).suffix or '.tif'}"
+    for path in (plain, resampled, legacy):
+        if output_is_done(path):
+            return path
+    return None
 
 
 def safe_output_stem(stem: str) -> str:
@@ -1300,10 +1321,10 @@ def write_dictionary(path: Path) -> None:
             }
         )
     for code, desc in (
-        ("cenario_1", "Puro com puro. Saida: ID-resampled.tif."),
-        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif."),
-        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO-resampled.tif."),
-        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO-resampled.tif."),
+        ("cenario_1", "Puro com puro. Saida: ID.tif. Se a grade diferir: ID-resampled.tif."),
+        ("cenario_2", "Mesma familia e versao. Saida: ID_ORTO.tif ou ID_ORTM_V1.tif. Se a grade diferir, o nome ganha -resampled."),
+        ("cenario_3", "Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO.tif. Se a grade diferir, o nome ganha -resampled."),
+        ("cenario_4", "Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO.tif. Se a grade diferir, o nome ganha -resampled."),
         ("nenhum", "Cenario 5, duplicata ou conflito. Nao houve GeoTIFF para esta linha."),
     ):
         rows.append(
@@ -1404,22 +1425,22 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
         metric(
             "cenario_1_puro_puro",
             sum(1 for row in pairs if row.get("cenario") == "1"),
-            "Cenario 1. Puro do RGB com puro do IR. Saida ID-resampled.tif.",
+            "Cenario 1. Puro do RGB com puro do IR. Saida ID.tif, ou ID-resampled.tif se a grade diferir.",
         ),
         metric(
             "cenario_2_mesma_familia",
             sum(1 for row in pairs if row.get("cenario") == "2"),
-            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO-resampled.tif ou ID_ORTM_V1-resampled.tif.",
+            "Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO.tif ou ID_ORTM_V1.tif. Se a grade diferir, o nome ganha -resampled.",
         ),
         metric(
             "cenario_3_puro_com_familia",
             sum(1 for row in pairs if row.get("cenario") == "3"),
-            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR-resampled.tif.",
+            "Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR.tif. Se a grade diferir, o nome ganha -resampled.",
         ),
         metric(
             "cenario_4_familias_diferentes",
             sum(1 for row in pairs if row.get("cenario") == "4"),
-            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR-resampled.tif.",
+            "Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR.tif. Se a grade diferir, o nome ganha -resampled.",
         ),
         metric(
             "cenario_5_sem_tif",
@@ -1717,12 +1738,17 @@ def fuse_one(job: dict) -> dict:
                 )
             if same_grid:
                 log(f"{prefix} Grade do IR ja coincide com o RGB. NIR copiado sem reamostrar.")
+                log(f"{prefix} Grade igual. O arquivo final sera {out_path.name}.")
                 alignment_note = "Grade do IR ja coincidia com o RGB; NIR copiado sem reamostrar."
             else:
+                out_path = out_path.with_name(resampled_output_name(out_path.name))
+                tmp_path = out_path.with_name(out_path.stem + TMP_SUFFIX)
+                _remove_quiet(tmp_path)
                 log(
                     f"{prefix} Alinhando IR na grade do RGB com nearest neighbor "
                     f"(rasterio.warp.reproject)."
                 )
+                log(f"{prefix} Grade diferente. O arquivo final sera {out_path.name}.")
                 alignment_note = (
                     "IR alinhado na grade do RGB com nearest neighbor. "
                     f"RGB={tuple(rgb_src.transform)[:6]} IR={tuple(ir_src.transform)[:6]}"
@@ -1824,6 +1850,7 @@ def fuse_one(job: dict) -> dict:
             return {
                 "status": "ok",
                 "detalhe": alignment_note,
+                "saida_nome": out_path.name,
                 "largura_px": width_px,
                 "altura_px": height_px,
                 "crs": crs_text,
@@ -1859,6 +1886,9 @@ def apply_result(row: dict[str, str], result: dict, *, run_id: str, out_dir: Pat
     row["status"] = result["status"]
     row["duracao_segundos"] = result.get("duracao_segundos", "")
     row["fim_utc"] = utc_now()
+    if result.get("saida_nome"):
+        row["saida_nome"] = result["saida_nome"]
+        row["saida_caminho"] = str(out_dir / result["saida_nome"])
     if result["status"] == "ok":
         alignment_note = result.get("detalhe") or ""
         row["detalhe"] = " ".join(part for part in (pairing_note, alignment_note) if part)
@@ -1989,43 +2019,50 @@ def _assign_resume_status(
     for row in rows:
         if row["tipo_registro"] != "par" or row["status"] == "conflito_saida":
             continue
-        out_path = out_dir / row["saida_nome"]
+        plain_name = row["saida_nome"]
+        found = None if overwrite else finished_output(out_dir, plain_name)
+        if found is not None:
+            row["saida_nome"] = found.name
+            row["saida_caminho"] = str(found)
+            restore_previous_fields(row, previous)
+            if verify_existing:
+                ok, detail = verify_existing_geotiff(found, nir_band)
+                if not ok:
+                    invalid_dir.mkdir(parents=True, exist_ok=True)
+                    moved = invalid_dir / found.name
+                    log(f"Saida invalida ({detail}). Movi {found.name} para {moved}")
+                    try:
+                        if moved.exists():
+                            moved.unlink()
+                        found.replace(moved)
+                    except OSError as exc:
+                        log(f"AVISO: nao consegui mover o invalido {found}: {exc}")
+                    row["saida_nome"] = plain_name
+                    row["saida_caminho"] = str(out_dir / plain_name)
+                    row["status"] = "pendente"
+                    row["detalhe"] = f"Arquivo anterior invalido ({detail}) movido para {moved}."
+                    row["notas"] = ""
+                    queue.append(row)
+                    continue
+                log(f"Conferido OK: {found.name} ({detail})")
+            row["status"] = "pulado_ja_existe"
+            if not row["saida_bytes"]:
+                try:
+                    row["saida_bytes"] = str(found.stat().st_size)
+                except OSError:
+                    pass
+            row["notas"] = ""
+            skipped.append(row)
+            continue
+        out_path = out_dir / plain_name
         row["saida_caminho"] = str(out_path)
         restore_previous_fields(row, previous)
-        if overwrite or not output_is_done(out_path):
-            if out_path.is_file() and out_path.stat().st_size <= 0:
-                log(f"Arquivo de saida vazio, vou refazer: {out_path.name}")
-                _remove_quiet(out_path)
-            row["status"] = "pendente"
-            row["notas"] = ""
-            queue.append(row)
-            continue
-        if verify_existing:
-            ok, detail = verify_existing_geotiff(out_path, nir_band)
-            if not ok:
-                invalid_dir.mkdir(parents=True, exist_ok=True)
-                moved = invalid_dir / out_path.name
-                log(f"Saida invalida ({detail}). Movi {out_path.name} para {moved}")
-                try:
-                    if moved.exists():
-                        moved.unlink()
-                    out_path.replace(moved)
-                except OSError as exc:
-                    log(f"AVISO: nao consegui mover o invalido {out_path}: {exc}")
-                row["status"] = "pendente"
-                row["detalhe"] = f"Arquivo anterior invalido ({detail}) movido para {moved}."
-                row["notas"] = ""
-                queue.append(row)
-                continue
-            log(f"Conferido OK: {out_path.name} ({detail})")
-        row["status"] = "pulado_ja_existe"
-        if not row["saida_bytes"]:
-            try:
-                row["saida_bytes"] = str(out_path.stat().st_size)
-            except OSError:
-                pass
+        if out_path.is_file() and out_path.stat().st_size <= 0:
+            log(f"Arquivo de saida vazio, vou refazer: {out_path.name}")
+            _remove_quiet(out_path)
+        row["status"] = "pendente"
         row["notas"] = ""
-        skipped.append(row)
+        queue.append(row)
     return skipped, queue
 
 
