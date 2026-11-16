@@ -14,6 +14,7 @@ echo  IR     F:\IR
 echo  Saida  G:\RGBNIR
 echo  Retoma sozinho: o que ja estiver em G:\RGBNIR e pulado.
 echo  Planilhas: rgbnir_summary.csv e rgbnir_registry.csv
+echo  Cobertura: G:\RGBNIR\rgbnir_cobertura.gpkg
 echo ============================================================
 echo.
 
@@ -42,6 +43,7 @@ echo Terminou com codigo %RC%.
 echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
 echo Registro:    G:\RGBNIR\rgbnir_registry.csv
 echo Dicionario:  G:\RGBNIR\rgbnir_registry_dicionario.csv
+echo Cobertura:   G:\RGBNIR\rgbnir_cobertura.gpkg
 echo.
 echo Se o codigo nao for 0, rode este .bat de novo para continuar do que falta.
 
