@@ -73,7 +73,7 @@ DEFAULT_LAZ_DIR = r"D:\laz"
 DEFAULT_OUT_GPKG = r"D:\laz_holes_igc.gpkg"
 DEFAULT_OUT_DIR = r"D:\\"
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 AUTO_ID_COLUMNS = ("NOMENC_2K", "NOMENC_5K", "NOMENC_10K")
 
@@ -187,8 +187,10 @@ def list_laz(root: Path) -> list[Path]:
 
 
 def atomic_to_file(path: Path, write_fn) -> None:
+    """Write to a temp sibling then replace. Keeps the real extension last
+    (``foo.tmp.gpkg``) so pyogrio/GDAL accept GPKG/GeoJSON/etc."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.stem}.tmp{path.suffix}")
     if tmp.exists():
         tmp.unlink()
     write_fn(tmp)
@@ -967,8 +969,10 @@ def main() -> int:
             "atualizado_utc": utc_now(),
         }
 
-    def flush() -> None:
+    def flush(write_spatial: bool = True) -> None:
         save_registry(reg_path, registry)
+        if not write_spatial:
+            return
         # layer de tiles sempre em SIRGAS 2000 geografico (articulacao / bbox reprojetado)
         write_gpkg(
             out_gpkg,
@@ -1042,12 +1046,15 @@ def main() -> int:
                         f"maior={float(result.get('largest_hole_m2') or 0)/1e4:.2f}ha  "
                         f"{float(result.get('elapsed_s') or 0):.1f}s"
                     )
-                    if processed % 5 == 0:
-                        flush()
+                    # CSV a cada 5; GPKG a cada 50 (reescrever GPKG gigante e caro e gerava warning)
+                    if processed % 50 == 0:
+                        flush(write_spatial=True)
+                    elif processed % 5 == 0:
+                        flush(write_spatial=False)
             except KeyboardInterrupt:
                 print("\n[Ctrl+C] Gravando progresso…")
             finally:
-                flush()
+                flush(write_spatial=True)
 
     # Summary para o professor
     rows = list(registry.values()) if registry else [
