@@ -31,6 +31,14 @@ tile, so the spreadsheet is useful even if the run is interrupted:
     rgbnir_registry.csv             one row per RGB/IR pair or leftover file
     rgbnir_registry_dicionario.csv  what each column and status value means
 
+A spatial cobertura GeoPackage is also kept in the output folder
+(``rgbnir_cobertura.gpkg``), with the same articulation schema used by
+``transferir_laz_rgb_ir_v3_por_aoi.py``. The first run that finds no GPKG
+bootstraps every finished TIFF already in ``G:\\RGBNIR``; afterwards each
+new successful write appends one feature. Updates are always written to a
+temporary file and renamed into place so a crash does not leave a half-written
+GPKG. Articulation polygons come from ``G:\\msb-phd-leucaena-sp.gpkg``.
+
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
 ``ORTO_RGB_`` / ``ORTO_IR_``, ``_ORTO_RGB`` / ``_ORTO_IR``, ``_V1``), they are still paired and the
@@ -93,6 +101,8 @@ DEFAULT_RGB_DIR = r"E:\RGB"
 DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
 DEFAULT_SP_BOUNDS = r"G:\sp-bounds.gpkg"
+DEFAULT_ARTICULACAO = r"G:\msb-phd-leucaena-sp.gpkg"
+DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
 
 # False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
 # True compares every RGB and IR against Sao Paulo again.
@@ -107,10 +117,30 @@ SUMMARY_NAME = "rgbnir_summary.csv"
 REGISTRY_NAME = "rgbnir_registry.csv"
 DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 SP_VISTORIA_NAME = "rgbnir_sp_vistoria.csv"
+COBERTURA_NAME = "rgbnir_cobertura.gpkg"
+COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.7.0"
+VERSION = "1.8.0"
+
+# Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
+_ID_COLUMN_BY_LAYER = {
+    "Articulacao_Laser_Fehidro": "NOMENC_2K",
+    "Articulacao_Laser_Lote4": "NOMENC_5K",
+    "Articulacao_Laser_Voo22": "NOMENC_5K",
+}
+_AUTO_ID_COLUMNS = ("NOMENC_2K", "NOMENC_5K", "NOMENC_10K")
+_COBERTURA_KEEP_COLS = (
+    "layer",
+    "NOMENC_2K",
+    "NOMENC_5K",
+    "NOMENC_10K",
+    "has_rgbnir",
+    "saida_nome",
+    "tile_key",
+    "geometry",
+)
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -1243,6 +1273,327 @@ def compose_note(row: dict[str, str], out_dir: Path) -> str:
 
 
 # -----------------------------------------------------------------------------
+# Cobertura GPKG (same articulation pattern as transferir_laz_rgb_ir_v3_por_aoi.py).
+# -----------------------------------------------------------------------------
+
+def tile_id_candidates_from_saida(saida_nome: str, tile_key: str = "") -> list[str]:
+    """Exact articulation-id candidates from an RGBNIR output filename.
+
+    Only exact NOMENC matches are used (no dash-cascade). A shortened id would
+    attach the wrong grid polygon to the cobertura feature.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def push(value: str) -> None:
+        text = (value or "").strip()
+        if not text:
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(text)
+
+    push(tile_key)
+    stem = Path(saida_nome).stem
+    stem = re.sub(r"(?i)[-_]resampled$", "", stem)
+    push(stem)
+
+    cen = re.match(r"(?i)^(.+)-CEN[34]-.+$", stem)
+    if cen:
+        push(cen.group(1))
+
+    cleaned = stem
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = re.sub(r"(?i)_(?:ORTM|ORTO)(?:_V\d+)?$", "", cleaned)
+        cleaned = re.sub(r"(?i)_V\d+$", "", cleaned)
+        cleaned = re.sub(r"(?i)_R\d+$", "", cleaned)
+    push(cleaned)
+    push(tile_key_from_filename(f"{cleaned}.tif"))
+    return ordered
+
+
+def _raster_bounds_polygon(path: Path):
+    """Fallback geometry when the articulation has no match for this tile id."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    if rasterio is None:
+        return None, None
+    try:
+        with rasterio.open(path) as src:
+            if src.crs is None:
+                return None, None
+            geom = box(
+                float(src.bounds.left),
+                float(src.bounds.bottom),
+                float(src.bounds.right),
+                float(src.bounds.top),
+            )
+            gdf = gpd.GeoDataFrame({"geometry": [geom]}, crs=src.crs)
+            return gdf.to_crs(epsg=4674).geometry.iloc[0], "EPSG:4674"
+    except Exception as exc:  # noqa: BLE001
+        log(f"AVISO: nao li o retangulo de {path.name} para a cobertura: {type(exc).__name__}: {exc}")
+        return None, None
+
+
+class RgbnirCobertura:
+    """Incremental RGBNIR cobertura GPKG with atomic replace (never in-place append)."""
+
+    def __init__(self, path: Path, artic_path: Path, artic_layer: str):
+        import geopandas as gpd
+
+        self.path = path
+        self.artic_path = artic_path
+        self.artic_layer = artic_layer
+        self._gpd = gpd
+        self._artic = None
+        self._indexes: dict[str, dict[str, int]] | None = None
+        self._gdf = None
+        self._known: set[str] = set()
+        self.enabled = True
+
+    def _empty_frame(self, crs="EPSG:4674"):
+        return self._gpd.GeoDataFrame(
+            {col: [] for col in _COBERTURA_KEEP_COLS},
+            geometry="geometry",
+            crs=crs,
+        )
+
+    def _ensure_artic(self) -> bool:
+        if self._artic is not None:
+            return True
+        if not self.artic_path.is_file():
+            log(f"AVISO: articulacao nao encontrada ({self.artic_path}). Cobertura desligada.")
+            self.enabled = False
+            return False
+        try:
+            log(f"Lendo articulacao para cobertura: {self.artic_path} | layer={self.artic_layer}")
+            artic = self._gpd.read_file(self.artic_path, layer=self.artic_layer)
+            if artic.crs is None:
+                artic = artic.set_crs(epsg=4674)
+            elif artic.crs.to_epsg() != 4674:
+                artic = artic.to_crs(epsg=4674)
+            indexes: dict[str, dict[str, int]] = {col: {} for col in _AUTO_ID_COLUMNS}
+            for idx, row in artic.iterrows():
+                for col in _AUTO_ID_COLUMNS:
+                    value = row.get(col)
+                    if value is None or (isinstance(value, float) and value != value):
+                        continue
+                    text = str(value).strip()
+                    if not text:
+                        continue
+                    bucket = indexes[col]
+                    key = text.casefold()
+                    if key not in bucket:
+                        bucket[key] = idx
+            self._artic = artic
+            self._indexes = indexes
+            log(
+                f"  Articulacao: {len(artic)} feicoes | "
+                f"ids 2K={len(indexes['NOMENC_2K'])} "
+                f"5K={len(indexes['NOMENC_5K'])} "
+                f"10K={len(indexes['NOMENC_10K'])}"
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log(f"AVISO: falha ao ler articulacao ({self.artic_path}): {type(exc).__name__}: {exc}")
+            self.enabled = False
+            return False
+
+    def _lookup_artic_row(self, saida_nome: str, tile_key: str = ""):
+        if not self._ensure_artic() or self._artic is None or self._indexes is None:
+            return None
+        # Prefer the id column each laser layer uses (same map as the transfer script).
+        preferred_cols = list(dict.fromkeys([*_ID_COLUMN_BY_LAYER.values(), *_AUTO_ID_COLUMNS]))
+        for candidate in tile_id_candidates_from_saida(saida_nome, tile_key):
+            key = candidate.casefold()
+            for col in preferred_cols:
+                idx = self._indexes[col].get(key)
+                if idx is None:
+                    continue
+                return self._artic.loc[idx]
+        return None
+
+    def _feature_from_saida(self, saida_path: Path, tile_key: str = "") -> dict | None:
+        if not saida_path.is_file() or saida_path.stat().st_size <= 0:
+            return None
+        saida_nome = saida_path.name
+        row = self._lookup_artic_row(saida_nome, tile_key)
+        if row is not None:
+            return {
+                "layer": row.get("layer"),
+                "NOMENC_2K": row.get("NOMENC_2K"),
+                "NOMENC_5K": row.get("NOMENC_5K"),
+                "NOMENC_10K": row.get("NOMENC_10K"),
+                "has_rgbnir": 1,
+                "saida_nome": saida_nome,
+                "tile_key": tile_key or tile_id_candidates_from_saida(saida_nome)[0],
+                "geometry": row.geometry,
+            }
+        geom, _crs = _raster_bounds_polygon(saida_path)
+        if geom is None:
+            log(f"AVISO: cobertura sem geometria para {saida_nome} (sem match na articulacao e sem CRS no TIFF).")
+            return None
+        return {
+            "layer": None,
+            "NOMENC_2K": None,
+            "NOMENC_5K": None,
+            "NOMENC_10K": None,
+            "has_rgbnir": 1,
+            "saida_nome": saida_nome,
+            "tile_key": tile_key or tile_id_candidates_from_saida(saida_nome)[0],
+            "geometry": geom,
+        }
+
+    def _save_atomic(self) -> bool:
+        if self._gdf is None:
+            return False
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(self.path.stem + ".writing.gpkg")
+        sidecars = [
+            tmp,
+            Path(str(tmp) + "-wal"),
+            Path(str(tmp) + "-shm"),
+            Path(str(tmp) + ".wal"),
+            Path(str(tmp) + ".shm"),
+        ]
+        try:
+            for side in sidecars:
+                if side.exists():
+                    side.unlink()
+            frame = self._gdf.copy()
+            keep = [c for c in _COBERTURA_KEEP_COLS if c in frame.columns]
+            frame = frame[keep]
+            frame.to_file(tmp, layer=COBERTURA_LAYER, driver="GPKG")
+            os.replace(tmp, self.path)
+            for side in sidecars[1:]:
+                if side.exists():
+                    side.unlink()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log(f"AVISO: nao consegui gravar a cobertura {self.path}: {type(exc).__name__}: {exc}")
+            for side in sidecars:
+                try:
+                    if side.exists():
+                        side.unlink()
+                except OSError:
+                    pass
+            return False
+
+    def load_or_bootstrap(self, out_dir: Path) -> None:
+        """Load existing GPKG, or build it once from every finished TIFF in out_dir."""
+        if not self.enabled:
+            return
+        if self.path.is_file():
+            try:
+                existing = self._gpd.read_file(self.path, layer=COBERTURA_LAYER)
+                if existing.crs is None:
+                    existing = existing.set_crs(epsg=4674)
+                elif existing.crs.to_epsg() != 4674:
+                    existing = existing.to_crs(epsg=4674)
+                if "saida_nome" not in existing.columns:
+                    existing["saida_nome"] = ""
+                if "has_rgbnir" not in existing.columns:
+                    existing["has_rgbnir"] = 1
+                if "tile_key" not in existing.columns:
+                    existing["tile_key"] = ""
+                for col in _COBERTURA_KEEP_COLS:
+                    if col not in existing.columns and col != "geometry":
+                        existing[col] = None
+                self._gdf = existing[[c for c in _COBERTURA_KEEP_COLS if c in existing.columns]].copy()
+                self._known = {
+                    str(name).casefold()
+                    for name in self._gdf["saida_nome"].fillna("").astype(str)
+                    if str(name).strip()
+                }
+                log(f"Cobertura existente: {len(self._gdf)} feicao(oes) em {self.path}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    f"AVISO: cobertura existente ilegivel ({self.path}): {type(exc).__name__}: {exc}. "
+                    "Vou reconstruir a partir dos TIFF em disco."
+                )
+
+        if not self._ensure_artic():
+            return
+        log(f"Cobertura ausente. Vou inventariar os TIFF ja prontos em {out_dir} ...")
+        features: list[dict] = []
+        listed = 0
+        for path in sorted(out_dir.iterdir() if out_dir.is_dir() else []):
+            if not path.is_file():
+                continue
+            lower = path.name.lower()
+            if not lower.endswith(RASTER_SUFFIXES):
+                continue
+            if lower.endswith(TMP_SUFFIX):
+                continue
+            listed += 1
+            feat = self._feature_from_saida(path)
+            if feat is not None:
+                features.append(feat)
+            if listed % 500 == 0:
+                log(f"  ... cobertura bootstrap: {listed} TIFF lidos, {len(features)} com geometria")
+        if features:
+            self._gdf = self._gpd.GeoDataFrame(features, geometry="geometry", crs="EPSG:4674")
+            self._known = {str(f["saida_nome"]).casefold() for f in features}
+        else:
+            self._gdf = self._empty_frame()
+            self._known = set()
+        if self._save_atomic():
+            log(f"Cobertura inicial gravada: {len(self._gdf)} feicao(oes) -> {self.path}")
+        else:
+            log("AVISO: bootstrap da cobertura falhou na gravacao. Continuarei tentando tile a tile.")
+
+    def add_saida(self, saida_path: Path | str, tile_key: str = "") -> bool:
+        """Append one finished output. No-op if already present. Atomic rewrite."""
+        if not self.enabled:
+            return False
+        path = Path(saida_path)
+        key = path.name.casefold()
+        if key in self._known:
+            return False
+        if self._gdf is None:
+            self._gdf = self._empty_frame()
+        feat = self._feature_from_saida(path, tile_key=tile_key)
+        if feat is None:
+            return False
+        import pandas as pd
+
+        target_crs = self._gdf.crs or "EPSG:4674"
+        novo = self._gpd.GeoDataFrame([feat], geometry="geometry", crs="EPSG:4674")
+        if target_crs is not None and novo.crs != target_crs:
+            novo = novo.to_crs(target_crs)
+        if len(self._gdf):
+            juntos = pd.concat([self._gdf, novo], ignore_index=True)
+            self._gdf = self._gpd.GeoDataFrame(juntos, geometry="geometry", crs=target_crs)
+        else:
+            self._gdf = novo
+        if self._save_atomic():
+            self._known.add(key)
+            return True
+        # roll back the in-memory row if disk write failed
+        self._gdf = self._gdf.iloc[:-1].copy() if len(self._gdf) else self._empty_frame(target_crs)
+        return False
+
+    def add_from_registry_row(self, row: dict[str, str], out_dir: Path) -> bool:
+        nome = (row.get("saida_nome") or "").strip()
+        if not nome:
+            return False
+        caminho = (row.get("saida_caminho") or "").strip()
+        path = Path(caminho) if caminho else (out_dir / nome)
+        if not path.is_file():
+            found = finished_output(out_dir, nome)
+            if found is None:
+                return False
+            path = found
+        return self.add_saida(path, tile_key=row.get("tile_key") or "")
+
+
+# -----------------------------------------------------------------------------
 # CSV registry. Disk is the source of truth for "already done"; the CSV is the log.
 # -----------------------------------------------------------------------------
 
@@ -1505,6 +1856,11 @@ def summarize(rows: list[dict[str, str]], *, rgb_dir: Path, ir_dir: Path, out_di
         metric("pasta_saida", str(out_dir), "Pasta onde os GeoTIFF de 4 bandas e estes CSV sao gravados."),
         metric("registro_detalhado", str(out_dir / REGISTRY_NAME), "Uma linha por par ou arquivo sem par, com os caminhos juntados."),
         metric("dicionario", str(out_dir / DICTIONARY_NAME), "Explicacao de cada coluna e de cada valor de status."),
+        metric(
+            "cobertura_gpkg",
+            str(out_dir / COBERTURA_NAME),
+            "GeoPackage com os grids da articulacao (ou retangulo do TIFF) ja fundidos em RGBNIR.",
+        ),
         metric(
             "receita",
             "banda1=Red(RGB1) banda2=Green(RGB2) banda3=Blue(RGB3) banda4=NIR(IR1)",
@@ -1927,6 +2283,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--articulacao",
+        default=DEFAULT_ARTICULACAO,
+        help=(
+            "GeoPackage da articulacao IGC usado para a cobertura espacial dos RGBNIR. "
+            f"Padrao: {DEFAULT_ARTICULACAO}"
+        ),
+    )
+    parser.add_argument(
+        "--articulacao-layer",
+        default=DEFAULT_ARTIC_LAYER,
+        help=f"Camada da articulacao dentro do GeoPackage. Padrao: {DEFAULT_ARTIC_LAYER}",
+    )
+    parser.add_argument(
+        "--no-cobertura",
+        action="store_true",
+        help="Nao grava nem atualiza o GeoPackage de cobertura na pasta de saida.",
+    )
+    parser.add_argument(
         "--force-sp",
         action="store_true",
         help=(
@@ -1991,6 +2365,11 @@ def _print_banner(args: argparse.Namespace, run_id: str, gdal_threads: int) -> N
     log(f"Resumo  -> {Path(args.out) / SUMMARY_NAME}")
     log(f"Registro-> {Path(args.out) / REGISTRY_NAME}")
     log(f"Dicionario -> {Path(args.out) / DICTIONARY_NAME}")
+    if getattr(args, "no_cobertura", False):
+        log("Cobertura GPKG -> desligada (--no-cobertura).")
+    else:
+        log(f"Cobertura GPKG -> {Path(args.out) / COBERTURA_NAME}")
+        log(f"Articulacao cobertura -> {args.articulacao} | layer={args.articulacao_layer}")
     log(
         "Retomada: se este script parar, rode o .bat de novo. "
         f"O que ja estiver em {args.out} com tamanho > 0 e pulado."
@@ -2147,6 +2526,7 @@ def _run_queue(
     nir_band: int,
     already_done: int,
     grand_total: int,
+    cobertura: RgbnirCobertura | None = None,
 ) -> str:
     """Fuse the queue. Returns 'ok', 'falha' or 'interrompido'.
 
@@ -2165,6 +2545,9 @@ def _run_queue(
         apply_result(row, result, run_id=run_id, out_dir=out_dir)
         if result["status"] == "ok":
             written += 1
+            if cobertura is not None:
+                if cobertura.add_from_registry_row(row, out_dir):
+                    log(f"Cobertura +1 -> {out_dir / COBERTURA_NAME} ({row.get('saida_nome')})")
         else:
             failed += 1
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
@@ -2287,6 +2670,7 @@ def _print_final(rows: list[dict[str, str]], out_dir: Path, started: float) -> N
     log(f"Resumo (abra no Excel): {out_dir / SUMMARY_NAME}")
     log(f"Registro tile a tile:   {out_dir / REGISTRY_NAME}")
     log(f"Dicionario das colunas: {out_dir / DICTIONARY_NAME}")
+    log(f"Cobertura espacial:     {out_dir / COBERTURA_NAME}")
     if missing:
         log("Para continuar, rode de novo o arquivo build_rgbnir_from_rgb_ir.bat.")
         log(f"Ele ve o que ja esta em {out_dir} e segue apenas no que falta.")
@@ -2355,6 +2739,23 @@ def main(argv: list[str] | None = None) -> int:
         log("Escrevendo o dicionario das colunas do CSV...")
         write_dictionary(out_dir / DICTIONARY_NAME)
         log(f"Dicionario: {out_dir / DICTIONARY_NAME}")
+
+        cobertura: RgbnirCobertura | None = None
+        if not args.no_cobertura:
+            try:
+                cobertura = RgbnirCobertura(
+                    path=out_dir / COBERTURA_NAME,
+                    artic_path=Path(args.articulacao),
+                    artic_layer=args.articulacao_layer,
+                )
+                cobertura.load_or_bootstrap(out_dir)
+                if not cobertura.enabled:
+                    cobertura = None
+            except Exception as exc:  # noqa: BLE001
+                log(f"AVISO: cobertura desligada apos erro: {type(exc).__name__}: {exc}")
+                cobertura = None
+        else:
+            log("Cobertura GPKG desligada por --no-cobertura.")
 
         sp_path = Path(args.sp_bounds)
         force_sp = FORCE_SP_VISTORIA or args.force_sp
@@ -2489,6 +2890,7 @@ def main(argv: list[str] | None = None) -> int:
             nir_band=int(args.nir_band),
             already_done=len(skipped),
             grand_total=len(pairing.pairs),
+            cobertura=cobertura,
         )
         _print_final(all_rows, out_dir, started)
         if outcome == "interrompido":
