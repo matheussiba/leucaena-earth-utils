@@ -37,7 +37,8 @@ A spatial cobertura GeoPackage is also kept in the output folder
 bootstraps every finished TIFF already in ``G:\\RGBNIR``; afterwards each
 new successful write appends one feature. Updates are always written to a
 temporary file and renamed into place so a crash does not leave a half-written
-GPKG. Articulation polygons come from ``G:\\msb-phd-leucaena-sp.gpkg``.
+GPKG. Articulation polygons come from
+``C:\\Users\\admin\\Documents\\Projetos_Matheus_Barros\\msb-phd-leucaena-sp.gpkg``.
 
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
@@ -101,7 +102,9 @@ DEFAULT_RGB_DIR = r"E:\RGB"
 DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
 DEFAULT_SP_BOUNDS = r"G:\sp-bounds.gpkg"
-DEFAULT_ARTICULACAO = r"G:\msb-phd-leucaena-sp.gpkg"
+DEFAULT_ARTICULACAO = (
+    r"C:\Users\admin\Documents\Projetos_Matheus_Barros\msb-phd-leucaena-sp.gpkg"
+)
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
 
 # False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
