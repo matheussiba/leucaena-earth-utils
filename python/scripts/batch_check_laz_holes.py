@@ -22,6 +22,7 @@ Uso (PowerShell, máquina do lab com D:\\laz):
   python batch_check_laz_holes.py --deadline-min 25
   python batch_check_laz_holes.py --laz-dir "D:\\laz" --workers 8 --cell-m 50
   python batch_check_laz_holes.py --fast --deadline-min 20
+  python batch_check_laz_holes.py --superfast --deadline-min 20
   python batch_check_laz_holes.py --limit 20   # fumaça
   python batch_check_laz_holes.py --report-only   # só regenera CSV/.md do registry (não reprocessa)
 
@@ -72,7 +73,7 @@ DEFAULT_LAZ_DIR = r"D:\laz"
 DEFAULT_OUT_GPKG = r"D:\laz_holes_igc.gpkg"
 DEFAULT_OUT_DIR = r"D:\\"
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 AUTO_ID_COLUMNS = ("NOMENC_2K", "NOMENC_5K", "NOMENC_10K")
 
@@ -140,6 +141,11 @@ def parse_args():
         "--fast",
         action="store_true",
         help="Atalho: cell_m=100, subsample=5, border=1 (vistoria bem mais rapida).",
+    )
+    p.add_argument(
+        "--superfast",
+        action="store_true",
+        help="Atalho extremo: cell_m=250, subsample=20, border=1, min_hole=1ha (inventario grosseiro).",
     )
     p.add_argument(
         "--force",
@@ -710,7 +716,13 @@ def write_gpkg(path: Path, tile_rows: list[dict], hole_rows: list[dict], tile_cr
 
 def main() -> int:
     a = parse_args()
-    if a.fast:
+    if a.superfast:
+        a.cell_m = 250.0
+        a.subsample = 20
+        a.border_cells = 1
+        a.min_hole_m2 = 10_000.0  # 1 ha — so buracos grandes
+        print("[superfast] cell_m=250 subsample=20 border_cells=1 min_hole=1ha")
+    elif a.fast:
         a.cell_m = 100.0
         a.subsample = 5
         a.border_cells = 1
@@ -826,17 +838,27 @@ def main() -> int:
         artic = load_artic_index(Path(a.articulacao), a.articulacao_layer)
 
     registry = {} if a.force else load_registry(reg_path)
-    done_ok = {
-        k
-        for k, r in registry.items()
-        if r.get("status") in {"ok", "has_hole"}
-        and float(r.get("cell_m") or 0) == float(a.cell_m)
-        and int(float(r.get("subsample") or 0)) == int(a.subsample)
-    }
+    if a.superfast:
+        # Nao reprocessa o que --fast (ou outra grade) ja terminou: so completa o que falta.
+        done_ok = {
+            k
+            for k, r in registry.items()
+            if r.get("status") in {"ok", "has_hole"}
+        }
+        skip_msg = "Ja no registry (qualquer grade; superfast nao refaz)"
+    else:
+        done_ok = {
+            k
+            for k, r in registry.items()
+            if r.get("status") in {"ok", "has_hole"}
+            and float(r.get("cell_m") or 0) == float(a.cell_m)
+            and int(float(r.get("subsample") or 0)) == int(a.subsample)
+        }
+        skip_msg = "Ja no registry (mesmos parametros)"
 
     pending = [p for p in files if str(p) not in done_ok]
     skipped = len(files) - len(pending)
-    print(f"Ja no registry (mesmos parametros): {skipped}")
+    print(f"{skip_msg}: {skipped}")
     print(f"A processar agora: {len(pending)}")
 
     # Carrega GPKG existente (se houver) para merge
