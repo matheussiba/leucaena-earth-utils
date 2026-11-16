@@ -12,7 +12,9 @@ echo  Batch buracos de cobertura nos LAZ IGC
 echo  Entrada : D:\laz
 echo  GPKG    : D:\laz_holes_igc.gpkg
 echo  CSV     : D:\laz_holes_summary.csv / D:\laz_holes_registry.csv
+echo  MD      : D:\laz_holes_relatorio.md
 echo  Retoma sozinho; use --deadline-min 25 se tiver reuniao.
+echo  So regenerar o .md:  --report-only
 echo ============================================================
 echo.
 
@@ -34,6 +36,8 @@ echo Argumentos extras: %*
 echo.
 echo Sugestao reuniao 30 min:
 echo   %PY% -u "%~dp0batch_check_laz_holes.py" --fast --deadline-min 25
+echo So atualizar o .md com o que ja rodou:
+echo   %PY% -u "%~dp0batch_check_laz_holes.py" --report-only
 echo.
 
 %PY% -u "%~dp0batch_check_laz_holes.py" %*
@@ -44,8 +48,10 @@ echo Terminou com codigo %RC%.
 echo GPKG:    D:\laz_holes_igc.gpkg
 echo Summary: D:\laz_holes_summary.csv
 echo Registry:D:\laz_holes_registry.csv
+echo MD:      D:\laz_holes_relatorio.md
 echo.
 echo Se parou no deadline ou Ctrl+C, rode de novo para continuar.
+echo Se so quiser o .md agora: rode com --report-only.
 
 echo %cmdcmdline% | findstr /i /c:"%~f0" >nul
 if %errorlevel%==0 pause

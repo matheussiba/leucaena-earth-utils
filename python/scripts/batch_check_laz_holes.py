@@ -15,6 +15,7 @@ Saídas (padrão no disco D:):
       layer laz_holes  -> polígonos dos buracos (CRS do LAZ / UTM local)
   D:\\laz_holes_summary.csv
   D:\\laz_holes_registry.csv   (retomável: reexecução pula o que já terminou)
+  D:\\laz_holes_relatorio.md   (texto para reunião / professor)
 
 Uso (PowerShell, máquina do lab com D:\\laz):
   python batch_check_laz_holes.py
@@ -22,6 +23,7 @@ Uso (PowerShell, máquina do lab com D:\\laz):
   python batch_check_laz_holes.py --laz-dir "D:\\laz" --workers 8 --cell-m 50
   python batch_check_laz_holes.py --fast --deadline-min 20
   python batch_check_laz_holes.py --limit 20   # fumaça
+  python batch_check_laz_holes.py --report-only   # só regenera CSV/.md do registry (não reprocessa)
 
 Dependências: laspy, numpy, geopandas, shapely  (+ pyogrio recomendado)
 """
@@ -70,7 +72,7 @@ DEFAULT_LAZ_DIR = r"D:\laz"
 DEFAULT_OUT_GPKG = r"D:\laz_holes_igc.gpkg"
 DEFAULT_OUT_DIR = r"D:\\"
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 AUTO_ID_COLUMNS = ("NOMENC_2K", "NOMENC_5K", "NOMENC_10K")
 
@@ -78,6 +80,7 @@ TILES_LAYER = "laz_tiles"
 HOLES_LAYER = "laz_holes"
 REGISTRY_NAME = "laz_holes_registry.csv"
 SUMMARY_NAME = "laz_holes_summary.csv"
+REPORT_NAME = "laz_holes_relatorio.md"
 
 
 # -----------------------------------------------------------------------------
@@ -147,6 +150,11 @@ def parse_args():
         "--no-artic",
         action="store_true",
         help="Nao tenta casar com articulacao; usa so bbox do header.",
+    )
+    p.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Nao processa LAZ: so le o registry ja gravado e regenera summary + .md da reuniao.",
     )
     return p.parse_args()
 
@@ -518,13 +526,162 @@ def save_registry(path: Path, registry: dict[str, dict]) -> None:
     atomic_to_file(path, _write)
 
 
-def save_summary(path: Path, stats: dict) -> None:
+def save_summary(path: Path, stats) -> None:
     def _write(tmp: Path) -> None:
         with tmp.open("w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["metrica", "valor", "nota"])
             for k, v, note in stats:
                 w.writerow([k, v, note])
+
+    atomic_to_file(path, _write)
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_relatorio_md(
+    *,
+    laz_dir: Path,
+    out_gpkg: Path,
+    n_listed: int,
+    rows: list[dict],
+    cell_m: float,
+    subsample: int,
+    min_hole_m2: float,
+    skipped: int,
+    processed: int,
+    stopped_deadline: bool,
+    elapsed_rodada: str,
+    report_only: bool,
+) -> str:
+    n_reg = len(rows)
+    n_hole = sum(1 for r in rows if _as_int(r.get("has_hole")) == 1)
+    n_ok = sum(1 for r in rows if (r.get("status") or "") == "ok")
+    n_err = sum(1 for r in rows if (r.get("status") or "") == "erro")
+    pct_hole = (100.0 * n_hole / n_reg) if n_reg else 0.0
+    pct_done = (100.0 * n_reg / n_listed) if n_listed else 0.0
+
+    top = sorted(
+        (r for r in rows if _as_int(r.get("has_hole")) == 1),
+        key=lambda r: _as_float(r.get("largest_hole_m2")),
+        reverse=True,
+    )[:15]
+
+    status_parcial = stopped_deadline or (n_listed > 0 and n_reg < n_listed)
+    titulo_status = "PARCIAL" if status_parcial else "COMPLETO (registry atual)"
+
+    lines: list[str] = [
+        "# Relatório — buracos de cobertura nos LAZ IGC",
+        "",
+        f"**Status:** {titulo_status}  ",
+        f"**Atualizado (UTC):** {utc_now()}  ",
+        f"**Script:** `batch_check_laz_holes.py {VERSION}`  ",
+        f"**Pasta LAZ:** `{laz_dir}`  ",
+        "",
+        "## Em uma frase",
+        "",
+        (
+            f"Vistoria automatizada de gaps interiores de pontos nos tiles LiDAR IGC: "
+            f"**{n_hole}** com buraco / **{n_reg}** vistoriados"
+            + (f" ({pct_done:.0f}% da lista desta run)." if n_listed else ".")
+        ),
+        "",
+        "## Números gerais (10 segundos)",
+        "",
+        "| Métrica | Valor |",
+        "|---|---:|",
+        f"| LAZ listados (esta run) | {n_listed} |",
+        f"| Já vistoriados (registry acumulado) | {n_reg} |",
+        f"| Com buraco (`has_hole=1`) | **{n_hole}** |",
+        f"| Sem buraco (`ok`) | {n_ok} |",
+        f"| Erro | {n_err} |",
+        f"| % com buraco (entre vistoriados) | {pct_hole:.1f}% |",
+        f"| Pulados nesta rodada (já no registry) | {skipped} |",
+        f"| Processados nesta rodada | {processed} |",
+        "",
+    ]
+
+    if report_only:
+        lines += [
+            "> Gerado com `--report-only`: **não reprocessou** LAZ; leu só o registry já gravado.",
+            "",
+        ]
+    if stopped_deadline:
+        lines += [
+            "> Parou por `--deadline-min` — resultado **parcial**. Rode de novo para continuar "
+            "(os já vistoriados são pulados).",
+            "",
+        ]
+    elif status_parcial and n_listed:
+        lines += [
+            f"> Ainda faltam ~{max(0, n_listed - n_reg)} arquivos da lista para fechar 100%.",
+            "",
+        ]
+
+    lines += [
+        "## Método (breve)",
+        "",
+        "- Fonte: nuvens `.laz` / `.las` brutas (sem CHM).",
+        f"- Grade de ocupação: célula **{cell_m:g} m**, subsample **1/{subsample}**.",
+        "- Borda do tile ignorada; buraco = componente vazio **interior**.",
+        f"- Área mínima reportada: **{min_hole_m2:g} m²** "
+        f"({min_hole_m2 / 1e4:.2f} ha).",
+        "- Retomável via `laz_holes_registry.csv` (mesmos parâmetros → não reprocessa).",
+        "",
+        "## Top buracos (maior polígono interior)",
+        "",
+    ]
+
+    if not top:
+        lines += [
+            "_Nenhum tile com `has_hole=1` no registry até agora._",
+            "",
+        ]
+    else:
+        lines += [
+            "| # | Tile (arquivo) | Maior buraco (ha) | N° buracos | Status |",
+            "|---:|---|---:|---:|---|",
+        ]
+        for i, r in enumerate(top, 1):
+            ha = _as_float(r.get("largest_hole_m2")) / 1e4
+            lines.append(
+                f"| {i} | `{r.get('laz_nome')}` | {ha:.2f} | "
+                f"{_as_int(r.get('n_holes'))} | {r.get('status')} |"
+            )
+        lines.append("")
+        lines.append("Exemplos para citar na reunião (3–5 primeiros da tabela acima).")
+        lines.append("")
+
+    lines += [
+        "## O que abrir além deste .md",
+        "",
+        f"- Planilha rápida: `D:\\\\laz_holes_summary.csv`",
+        f"- Registro linha a linha: `D:\\\\laz_holes_registry.csv`",
+        f"- Mapa (mostrar à parte no QGIS): `{out_gpkg}`",
+        "  - layer `laz_tiles` → filtrar `has_hole = 1`",
+        "  - layer `laz_holes` → polígonos dos gaps",
+        "",
+        f"_Tempo desta rodada: {elapsed_rodada}_",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def save_relatorio_md(path: Path, text: str) -> None:
+    def _write(tmp: Path) -> None:
+        tmp.write_text(text, encoding="utf-8")
 
     atomic_to_file(path, _write)
 
@@ -560,16 +717,89 @@ def main() -> int:
         print("[fast] cell_m=100 subsample=5 border_cells=1")
 
     laz_dir = Path(a.laz_dir)
-    if not laz_dir.is_dir():
-        print(f"[ERRO] Pasta LAZ nao existe: {laz_dir}")
-        print("Este script espera o disco do lab (ex.: D:\\laz).")
-        return 2
-
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_gpkg = Path(a.out_gpkg)
     reg_path = out_dir / REGISTRY_NAME
     sum_path = out_dir / SUMMARY_NAME
+    md_path = out_dir / REPORT_NAME
+
+    # --report-only: só regenera CSV/.md a partir do registry (não reprocessa).
+    if a.report_only:
+        registry = load_registry(reg_path)
+        if not registry:
+            print(f"[ERRO] Registry vazio/ausente: {reg_path}")
+            print("Rode o batch pelo menos uma vez antes de --report-only.")
+            return 2
+        files = list_laz(laz_dir) if laz_dir.is_dir() else []
+        n_listed = len(files) if files else len(registry)
+        rows = list(registry.values())
+        n_reg = len(rows)
+        n_hole = sum(1 for r in rows if _as_int(r.get("has_hole")) == 1)
+        n_ok = sum(1 for r in rows if (r.get("status") or "") == "ok")
+        n_err = sum(1 for r in rows if (r.get("status") or "") == "erro")
+        top = sorted(
+            (r for r in rows if _as_int(r.get("has_hole")) == 1),
+            key=lambda r: _as_float(r.get("largest_hole_m2")),
+            reverse=True,
+        )[:15]
+        # parametros: prefere o que esta no registry (moda simples pelo 1o ok/has_hole)
+        cell_m = a.cell_m
+        subsample = a.subsample
+        for r in rows:
+            if r.get("status") in {"ok", "has_hole"}:
+                cell_m = _as_float(r.get("cell_m"), cell_m)
+                subsample = _as_int(r.get("subsample"), subsample)
+                break
+        stats = [
+            ("script", f"batch_check_laz_holes.py {VERSION}", "Versao"),
+            ("atualizado_utc", utc_now(), "report-only"),
+            ("laz_dir", str(laz_dir), ""),
+            ("arquivos_listados", n_listed, "Lista em disco se existir; senao = registry"),
+            ("arquivos_no_registry", n_reg, "Ja vistoriados (acumulado)"),
+            ("com_buraco", n_hole, "has_hole=1"),
+            ("sem_buraco", n_ok, "status=ok"),
+            ("erro", n_err, ""),
+            ("pulados_nesta_rodada", n_reg, "report-only"),
+            ("processados_nesta_rodada", 0, ""),
+            ("deadline_atingido", 0, ""),
+            ("cell_m", cell_m, "do registry"),
+            ("subsample", subsample, "do registry"),
+            ("min_hole_m2", a.min_hole_m2, ""),
+            ("gpkg", str(out_gpkg), f"layers: {TILES_LAYER}, {HOLES_LAYER}"),
+            ("elapsed_rodada", "0s", "report-only"),
+        ]
+        save_summary(sum_path, stats)
+        md = build_relatorio_md(
+            laz_dir=laz_dir,
+            out_gpkg=out_gpkg,
+            n_listed=n_listed,
+            rows=rows,
+            cell_m=cell_m,
+            subsample=subsample,
+            min_hole_m2=float(a.min_hole_m2),
+            skipped=n_reg,
+            processed=0,
+            stopped_deadline=False,
+            elapsed_rodada="0s",
+            report_only=True,
+        )
+        save_relatorio_md(md_path, md)
+        print("=" * 64)
+        print(f"report-only | registry={n_reg} | buracos={n_hole} | ok={n_ok} | erro={n_err}")
+        if top:
+            print("Top buracos:")
+            for r in top[:5]:
+                print(f"  {r.get('laz_nome')}: {_as_float(r.get('largest_hole_m2'))/1e4:.2f} ha")
+        print(f"MD  : {md_path}")
+        print(f"CSV : {sum_path}")
+        print("Pronto (sem reprocessar LAZ).")
+        return 0
+
+    if not laz_dir.is_dir():
+        print(f"[ERRO] Pasta LAZ nao existe: {laz_dir}")
+        print("Este script espera o disco do lab (ex.: D:\\laz).")
+        return 2
 
     files = list_laz(laz_dir)
     if not files:
@@ -583,6 +813,7 @@ def main() -> int:
     print(f"LAZ dir : {laz_dir}  ({len(files)} arquivos)")
     print(f"GPKG    : {out_gpkg}")
     print(f"CSV     : {reg_path}")
+    print(f"MD      : {md_path}")
     print(
         f"grade   : cell={a.cell_m}m  subsample=1/{a.subsample}  "
         f"border={a.border_cells}  min_hole={a.min_hole_m2} m2"
@@ -840,6 +1071,21 @@ def main() -> int:
         ("elapsed_rodada", format_tempo(time.perf_counter() - t_run), ""),
     ]
     save_summary(sum_path, stats)
+    md = build_relatorio_md(
+        laz_dir=laz_dir,
+        out_gpkg=out_gpkg,
+        n_listed=n_total_disk,
+        rows=rows,
+        cell_m=float(a.cell_m),
+        subsample=int(a.subsample),
+        min_hole_m2=float(a.min_hole_m2),
+        skipped=skipped,
+        processed=processed,
+        stopped_deadline=stopped_deadline,
+        elapsed_rodada=format_tempo(time.perf_counter() - t_run),
+        report_only=False,
+    )
+    save_relatorio_md(md_path, md)
     flush()
 
     print("\n" + "=" * 64)
@@ -856,7 +1102,8 @@ def main() -> int:
         for r in top:
             ha = float(r.get("largest_hole_m2") or 0) / 1e4
             print(f"  {r.get('laz_nome')}: {ha:.2f} ha  (n_holes={r.get('n_holes')})")
-    print(f"\nGPKG : {out_gpkg}")
+    print(f"\nMD   : {md_path}")
+    print(f"GPKG : {out_gpkg}")
     print(f"CSV  : {sum_path}")
     print(f"Reg  : {reg_path}")
     print("Pronto.")
