@@ -34,7 +34,9 @@ if not defined PY (
 echo Usando: %PY%
 echo Argumentos extras: %*
 echo.
-echo Sugestao reuniao 30 min:
+echo Sugestao reuniao (mais rapido ainda):
+echo   %PY% -u "%~dp0batch_check_laz_holes.py" --superfast --deadline-min 25
+echo Alternativa (--fast, grade 100m):
 echo   %PY% -u "%~dp0batch_check_laz_holes.py" --fast --deadline-min 25
 echo So atualizar o .md com o que ja rodou:
 echo   %PY% -u "%~dp0batch_check_laz_holes.py" --report-only
