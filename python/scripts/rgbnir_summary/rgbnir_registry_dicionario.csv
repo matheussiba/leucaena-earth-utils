@@ -1,0 +1,48 @@
+﻿topico,nome,descricao,exemplo
+coluna,status,Situacao desta linha agora. Veja as linhas 'valor_de_status' neste dicionario.,pulado_ja_existe
+coluna,tile_key,"Identificador do tile. No pareamento por nome igual, e o nome do arquivo sem extensao.",SF-23-Y-C-IV-2
+coluna,notas,"Frase com a juncao usada: qual RGB, qual IR, quais bandas e qual arquivo de saida.",Juntou E:\RGB\SF-23.tif bandas 1-3 com F:\IR\SF-23.tif banda 1 em G:\RGBNIR\SF-23.tif.
+coluna,rgb_nome,Nome do arquivo RGB usado neste par. Vazio se este RGB nao existe.,SF-23.tif
+coluna,ir_nome,Nome do arquivo IR usado neste par. Vazio se este IR nao existe.,SF-23.tif
+coluna,saida_nome,"Nome do GeoTIFF. Cenario 1: ID.tif. Cenario 2: ID_ORTO.tif ou ID_ORTM_V1.tif. Cenario 3: ID-CEN3-RAW-ORTO.tif. Cenario 4: ID-CEN4-ORTM-ORTO.tif. Se a grade do IR diferir da do RGB, o mesmo nome ganha -resampled antes da extensao.",SF-22-X_ORTM_V1.tif
+coluna,cenario,"1=puro+puro, 2=mesma familia e versao, 3=puro com familia sem par, 4=familias diferentes, 5=sem par ou anomalia (nao gera tif).",2
+coluna,tipo_rgb,"Classificacao do RGB: RAW (puro), ou familia/versao como ORTO, ORTM, ORTM_V1, R1, V2.",ORTM_V1
+coluna,tipo_ir,"Classificacao do IR, no mesmo vocabulario de tipo_rgb. RAW representa o arquivo puro.",ORTO
+coluna,modo_pareamento,cenario_1 a cenario_4 quando houve par. nenhum quando o arquivo ficou no cenario 5.,cenario_2
+coluna,tipo_registro,"par = RGB e IR casados; rgb_sem_ir / ir_sem_rgb = arquivo sem parceiro; duplicata_ignorada = mesmo nome repetido, ficou o maior; conflito_saida = dois pares queriam o mesmo nome de saida.",par
+coluna,rgb_caminho,Caminho completo do RGB. A pasta de origem nao e alterada.,E:\RGB\SF-23.tif
+coluna,ir_caminho,Caminho completo do IR. A pasta de origem nao e alterada.,F:\IR\SF-23.tif
+coluna,saida_caminho,Caminho completo do RGBNIR de 4 bandas.,G:\RGBNIR\SF-23.tif
+coluna,bandas_rgb,"Bandas copiadas do RGB, nesta ordem: 1=Red, 2=Green, 3=Blue.","1,2,3"
+coluna,banda_nir_ir,Banda do arquivo IR copiada para a banda 4 (NIR) da saida.,1
+coluna,largura_px,"Largura do raster em pixels, preenchida quando o tile e gravado.",20000
+coluna,altura_px,"Altura do raster em pixels, preenchida quando o tile e gravado.",20000
+coluna,crs,CRS lido do RGB no momento da gravacao.,EPSG:31983
+coluna,rgb_bytes,Tamanho do arquivo RGB em bytes.,1500000000
+coluna,ir_bytes,Tamanho do arquivo IR em bytes.,1400000000
+coluna,saida_bytes,"Tamanho do RGBNIR gravado, em bytes. Vazio enquanto ainda nao existe.",2800000000
+coluna,inicio_utc,Hora UTC em que a gravacao deste tile comecou. Preservada nas execucoes seguintes.,2026-11-05T20:15:01Z
+coluna,fim_utc,Hora UTC em que a gravacao terminou com sucesso.,2026-11-05T20:21:40Z
+coluna,duracao_segundos,Segundos gastos na gravacao deste tile.,399.2
+coluna,detalhe,"Aviso ou motivo tecnico da ultima tentativa (grade diferente, banda faltando, etc.).",
+coluna,ultimo_erro,Ultimo erro de gravacao. Limpo quando uma gravacao da certo. Mantido se o arquivo ja existia.,
+coluna,run_id_que_gravou,Identificador da execucao que criou o arquivo final. Nao muda quando o tile e apenas pulado.,20261105T201501Z
+coluna,run_id_desta_execucao,Identificador da execucao que reescreveu esta planilha.,20261105T221001Z
+coluna,atualizado_utc,Hora UTC da ultima vez que esta planilha foi regravada (depois de cada tile).,2026-11-05T22:10:01Z
+valor_de_status,ok,GeoTIFF de 4 bandas gravado nesta execucao.,ok
+valor_de_status,pulado_ja_existe,O arquivo final ja estava na pasta de saida (de uma execucao anterior ou desta). Nao foi refeito.,pulado_ja_existe
+valor_de_status,pendente,"Par encontrado, ainda sem arquivo final. Entra na fila desta execucao.",pendente
+valor_de_status,falha,A gravacao nao terminou. O parcial foi apagado. Rodar o .bat de novo tenta so este de novo.,falha
+valor_de_status,interrompido,Ctrl+C no meio deste tile. Nada final foi deixado. Rodar de novo continua por ele.,interrompido
+valor_de_status,sem_par,Cenario 5. Nao havia arquivo do outro lado para formar par. Nenhum tif foi gerado.,sem_par
+valor_de_status,anomalia,"Cenario 5. O tile tinha mais de um arquivo do mesmo tipo, ou o nome nao virou um id. Nenhum tif foi gerado para este arquivo.",anomalia
+valor_de_status,duplicata_ignorada,Dois arquivos com o mesmo nome. O script ficou com o maior e registrou este aqui sem usa-lo.,duplicata_ignorada
+valor_de_status,conflito_saida,"Dois pares diferentes produziriam o mesmo nome em G:\RGBNIR. Este nao foi gravado, para nao sobrescrever o outro.",conflito_saida
+valor_de_status,fora_de_sp,O retangulo do raster nao intersecta o limite de Sao Paulo. Nao entra no pareamento nem na fusao.,fora_de_sp
+valor_de_status,sem_localizacao,"Nao deu para ler o CRS ou o retangulo do raster, entao ele nao foi comparado com Sao Paulo e ficou de fora.",sem_localizacao
+valor_de_modo_pareamento,cenario_1,Puro com puro. Saida: ID.tif. Se a grade diferir: ID-resampled.tif.,cenario_1
+valor_de_modo_pareamento,cenario_2,"Mesma familia e versao. Saida: ID_ORTO.tif ou ID_ORTM_V1.tif. Se a grade diferir, o nome ganha -resampled.",cenario_2
+valor_de_modo_pareamento,cenario_3,"Puro de um lado com familia do outro. Saida: ID-CEN3-RAW-ORTO.tif. Se a grade diferir, o nome ganha -resampled.",cenario_3
+valor_de_modo_pareamento,cenario_4,"Familias diferentes, sem puro sobrando. Saida: ID-CEN4-ORTM-ORTO.tif. Se a grade diferir, o nome ganha -resampled.",cenario_4
+valor_de_modo_pareamento,nenhum,"Cenario 5, duplicata ou conflito. Nao houve GeoTIFF para esta linha.",nenhum
+receita_das_bandas,RGBNIR,"Banda 1 = Red (RGB banda 1). Banda 2 = Green (RGB banda 2). Banda 3 = Blue (RGB banda 3). Banda 4 = NIR (IR banda 1). A banda 4 NAO e alfa, para o QGIS nao aplicar transparencia.",4 bandas

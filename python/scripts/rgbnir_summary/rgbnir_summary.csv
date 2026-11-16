@@ -1,0 +1,31 @@
+﻿metrica,valor,o_que_significa
+faltam_gravar,5409,Pares RGB+IR que AINDA nao tem GeoTIFF final. Rodar o .bat de novo continua so por estes.
+prontos_no_disco,3451,Pares cujo arquivo final ja esta na pasta de saida (gravados agora ou antes).
+percentual_pronto,38.95,Percentual dos pares que ja tem arquivo final. 100 significa que nao falta nenhum par.
+pares_encontrados,8860,Pares dos cenarios 1 a 4. Cada um gera um GeoTIFF.
+cenario_1_puro_puro,4532,"Cenario 1. Puro do RGB com puro do IR. Saida ID.tif, ou ID-resampled.tif se a grade diferir."
+cenario_2_mesma_familia,3987,"Cenario 2. Mesma familia e versao nos dois lados. Saida ID_ORTO.tif ou ID_ORTM_V1.tif. Se a grade diferir, o nome ganha -resampled."
+cenario_3_puro_com_familia,156,"Cenario 3. Puro de um lado fechou com uma familia do outro. Saida ID-CEN3-TIPO_RGB-TIPO_IR.tif. Se a grade diferir, o nome ganha -resampled."
+cenario_4_familias_diferentes,185,"Cenario 4. Familias diferentes, sem puro sobrando. Saida ID-CEN4-TIPO_RGB-TIPO_IR.tif. Se a grade diferir, o nome ganha -resampled."
+cenario_5_sem_tif,223,Cenario 5. Arquivos que nao formaram par. Nenhum tif foi gerado para eles.
+fora_de_sp,573,Rasters cujo retangulo nao intersecta Sao Paulo. Foram ignorados antes do pareamento.
+sem_localizacao,120,Rasters sem CRS ou sem retangulo legivel. Foram ignorados porque nao deu para compara-los com SP.
+gravados_nesta_execucao,48,Arquivos de 4 bandas escritos do zero nesta execucao (status ok).
+pulados_ja_existiam,3403,Arquivos que ja estavam na pasta de saida e foram deixados como estavam.
+falhas_nesta_execucao,0,Tentativas que falharam nesta execucao. Entram de novo em faltam_gravar.
+rgb_sem_ir,15,Arquivos em E:\RGB sem IR correspondente. Na proxima execucao eles entram se o IR aparecer.
+ir_sem_rgb,112,Arquivos em F:\IR sem RGB correspondente. Na proxima execucao eles entram se o RGB aparecer.
+anomalias,96,"Cenario 5. Tipo repetido no mesmo tile, ou nome sem id. Nao geraram tif."
+duplicatas_ignoradas,0,Arquivos de mesmo nome repetidos em subpastas. O maior foi o escolhido.
+conflitos_de_nome_de_saida,0,Pares que produziriam o mesmo nome de saida. Nao foram gravados; olhe o registro.
+arquivos_rgb_lidos,9323,Linhas do registro que apontam um RGB.
+arquivos_ir_lidos,9313,Linhas do registro que apontam um IR.
+run_id,20261116T153008Z,Identificador desta execucao (UTC).
+pasta_rgb,E:\RGB,Pasta de origem RGB. Nao e modificada.
+pasta_ir,F:\IR,Pasta de origem IR. Nao e modificada.
+pasta_saida,G:\RGBNIR,Pasta onde os GeoTIFF de 4 bandas e estes CSV sao gravados.
+registro_detalhado,G:\RGBNIR\rgbnir_registry.csv,"Uma linha por par ou arquivo sem par, com os caminhos juntados."
+dicionario,G:\RGBNIR\rgbnir_registry_dicionario.csv,Explicacao de cada coluna e de cada valor de status.
+receita,banda1=Red(RGB1) banda2=Green(RGB2) banda3=Blue(RGB3) banda4=NIR(IR1),Como as bandas sao empilhadas. A banda 4 nao e canal alfa.
+script,build_rgbnir_from_rgb_ir.py 1.7.0,Versao do script que escreveu este resumo.
+atualizado_utc,2026-11-16T18:34:11Z,Ultima vez que este resumo foi reescrito.
