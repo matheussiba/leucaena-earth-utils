@@ -358,7 +358,10 @@ read_artic_table <- function(path, layer) {
     'SELECT "NOMENC_2K", "NOMENC_5K", "NOMENC_10K", "BLOCO", "layer", "periodvoo" FROM "%s"',
     layer
   )
-  DBI::dbGetQuery(con, sql)
+  say("Consultando a tabela da articulacao (SQLite, somente leitura)...")
+  tab <- DBI::dbGetQuery(con, sql)
+  say("Tabela lida: ", nrow(tab), " linha(s).")
+  tab
 }
 
 build_index <- function(raw) {
@@ -402,10 +405,15 @@ ensure_artic_cache <- function(src, dest) {
     copy <- is.na(b$size) || a$size != b$size || a$mtime > b$mtime + 1
   }
   if (copy) {
+    say("Copiando a articulacao para o cache da saida:")
+    say("  ", dest)
     ok <- file.copy(src, dest, overwrite = TRUE)
     if (!ok) stop("Nao copiei a articulacao para ", dest, call. = FALSE)
     unlink(paste0(dest, "-wal"))
     unlink(paste0(dest, "-shm"))
+    say("Cache da articulacao gravado.")
+  } else {
+    say("Cache da articulacao ja esta em dia: ", dest)
   }
   dest
 }
@@ -485,15 +493,28 @@ load_historico <- function(path) {
 
 scan_done <- function(dir_processed) {
   vazio <- data.table::data.table(tile_id = character(), pasta_saida = character(), finalizado_utc = character())
-  if (!dir.exists(dir_processed)) return(vazio)
+  say("Procurando tiles ja prontos em ", dir_processed)
+  if (!dir.exists(dir_processed)) {
+    say("  A pasta de produtos ainda nao existe. Nenhum tile pronto.")
+    return(vazio)
+  }
   kids <- list.dirs(dir_processed, recursive = FALSE, full.names = TRUE)
-  if (!length(kids)) return(vazio)
+  if (!length(kids)) {
+    say("  Nenhuma pasta de tile nesta saida.")
+    return(vazio)
+  }
+  say("  ", length(kids), " pasta(s) para conferir (_INFO_summary_processing.csv e sem _ERROR.txt).")
   rows <- vector("list", length(kids))
   n <- 0L
-  for (k in kids) {
+  for (i in seq_along(kids)) {
+    k <- kids[[i]]
+    say("  [", i, "/", length(kids), "] conferindo ", basename(k))
     info <- list.files(k, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE, full.names = TRUE)
     err <- list.files(k, pattern = "^_ERROR\\.txt$", recursive = TRUE)
-    if (!length(info) || length(err)) next
+    if (!length(info) || length(err)) {
+      say("      ainda nao conta como pronto.")
+      next
+    }
     mt <- file.info(info[[1]])$mtime
     n <- n + 1L
     rows[[n]] <- data.table::data.table(
@@ -501,7 +522,9 @@ scan_done <- function(dir_processed) {
       pasta_saida = normalizePath(k, winslash = "/"),
       finalizado_utc = format(mt, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
     )
+    say("      pronto.")
   }
+  say("Tiles prontos no disco: ", n, ".")
   if (!n) return(vazio)
   data.table::rbindlist(rows[seq_len(n)])
 }
@@ -587,22 +610,72 @@ fill_laz_from_plan <- function(registry, plan) {
 # ---------------------------------------------------------------------------
 
 list_lidar <- function(root, out_dir) {
-  files <- list.files(
-    root, pattern = "\\.(laz|las)$", recursive = TRUE,
-    full.names = TRUE, ignore.case = TRUE
-  )
-  if (!length(files)) return(files)
-  files <- normalizePath(files, winslash = "/", mustWork = TRUE)
+  say("Listando .laz/.las em ", root)
+  say("A pasta inteira e percorrida antes do filtro de BLOCO. Cada pasta aparece abaixo.")
+  root_n <- normalizePath(root, winslash = "/", mustWork = TRUE)
   root_out <- normalizePath(out_dir, winslash = "/", mustWork = FALSE)
-  files[!startsWith(tolower(files), tolower(paste0(root_out, "/")))]
+  skip_prefix <- tolower(paste0(root_out, "/"))
+  found <- list()
+  n_found <- 0L
+  n_dirs <- 0L
+  queue <- root_n
+  i <- 1L
+  while (i <= length(queue)) {
+    d <- queue[[i]]
+    i <- i + 1L
+    if (tolower(d) == tolower(root_out) || startsWith(tolower(d), skip_prefix)) next
+    n_dirs <- n_dirs + 1L
+    say("  [pasta ", n_dirs, "] lendo nomes em ", d)
+    here <- list.files(
+      d, pattern = "\\.(laz|las)$", recursive = FALSE,
+      full.names = TRUE, ignore.case = TRUE
+    )
+    kids <- list.dirs(d, recursive = FALSE, full.names = TRUE)
+    if (length(kids)) {
+      kids <- normalizePath(kids, winslash = "/", mustWork = FALSE)
+      kids <- kids[tolower(kids) != tolower(root_out) & !startsWith(tolower(kids), skip_prefix)]
+      if (length(kids)) queue <- c(queue, kids)
+    }
+    n_here <- 0L
+    if (length(here)) {
+      say("      normalizando ", length(here), " caminho(s)...")
+      here <- normalizePath(here, winslash = "/", mustWork = TRUE)
+      here <- here[!startsWith(tolower(here), skip_prefix)]
+      n_here <- length(here)
+      if (n_here) {
+        found[[length(found) + 1L]] <- here
+        n_found <- n_found + n_here
+        say("      ultimo desta pasta: ", basename(here[[n_here]]))
+      }
+    }
+    say(
+      "      ", n_here, " arquivo(s) aqui | ", n_found, " no total | ",
+      length(kids), " subpasta(s) a seguir"
+    )
+  }
+  say("Varredura terminou: ", n_found, " arquivo(s) .laz/.las em ", n_dirs, " pasta(s).")
+  if (!n_found) return(character())
+  unlist(found, use.names = FALSE)
 }
 
 make_plan <- function(files, idx, blocos, done_ids, limit, force) {
+  say("Montando o plano: ", length(files), " arquivo(s).")
   files_dt <- data.table::data.table(laz_path = files)
   files_dt[, laz_nome := basename(laz_path)]
   files_dt[, tile_id := toupper(tools::file_path_sans_ext(laz_nome))]
-  info <- file.info(files_dt$laz_path)
-  files_dt[, tamanho_bytes := ifelse(is.na(info$size), 0, info$size)]
+  n <- nrow(files_dt)
+  sizes <- numeric(n)
+  if (n) {
+    say("Lendo o tamanho de cada arquivo para descartar duplicata menor.")
+    chunk <- 200L
+    for (i in seq.int(1L, n, by = chunk)) {
+      j <- min(n, i + chunk - 1L)
+      info <- file.info(files_dt$laz_path[i:j])
+      sizes[i:j] <- ifelse(is.na(info$size), 0, info$size)
+      say("  tamanhos ", j, "/", n, " | ", files_dt$laz_nome[[j]])
+    }
+  }
+  files_dt[, tamanho_bytes := sizes]
   data.table::setorder(files_dt, tile_id, -tamanho_bytes)
   n_dup <- nrow(files_dt) - data.table::uniqueN(files_dt$tile_id)
   files_dt <- files_dt[!duplicated(tile_id)]
@@ -644,6 +717,10 @@ make_plan <- function(files, idx, blocos, done_ids, limit, force) {
   plan[acao == "adiado_limit", motivo := "alem do --limit desta rodada"]
   plan[acao == "processar" & !nzchar(layer_artic), motivo := "sem ficha na articulacao"]
   attr(plan, "n_dup") <- n_dup
+  say(
+    "Plano pronto. Unicos: ", nrow(plan),
+    " | duplicados deixados de lado: ", n_dup, "."
+  )
   plan
 }
 
@@ -1168,12 +1245,13 @@ source_helper <- function(path) {
       call. = FALSE
     )
   }
-  cat("Carregando pipeline GeoTrees...\n")
-  flush.console()
+  say("Carregando o pipeline oficial do GeoTrees. Esta parte carrega varios pacotes e pode demorar.")
+  say("  ", path)
   suppressPackageStartupMessages(sys.source(path, envir = globalenv()))
   if (!exists("process.dataset", mode = "function", envir = globalenv())) {
     stop("process.dataset nao apareceu depois de carregar o helper.", call. = FALSE)
   }
+  say("Pipeline GeoTrees carregado.")
 }
 
 run_one <- function(src, opt, paths, inbox, metadata) {
@@ -1251,6 +1329,11 @@ put_registry <- function(registry, row) {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+say <- function(...) {
+  cat(paste0(...), "\n", sep = "")
+  flush.console()
+}
 
 log_line <- function(path, ...) {
   msg <- paste0(format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " | ", paste0(..., collapse = ""))
@@ -1390,16 +1473,23 @@ main <- function() {
     cat("O GPKG fica em data/articulacao_igc_sp/ dentro do clone:\n")
     cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
   } else {
-    cat("Lendo articulacao (atributos): ", opt$articulacao, "\n", sep = "")
-    idx <- build_index(read_artic_table(opt$articulacao, opt$articulacao_layer))
-    cat("IDs indexados: ", nrow(idx), "\n", sep = "")
+    say("Lendo articulacao (atributos): ", opt$articulacao)
+    artic_tab <- read_artic_table(opt$articulacao, opt$articulacao_layer)
+    say("Montando o indice NOMENC_2K / NOMENC_5K / NOMENC_10K...")
+    idx <- build_index(artic_tab)
+    say("IDs indexados: ", nrow(idx), ".")
+    say("Agora o script varre a pasta de LAZ e a saida. Ainda nao comecou tile nenhum.")
   }
 
+  say("Lendo registro: ", paths$registry)
   registry <- load_registry(paths$registry)
+  say("Registro: ", nrow(registry), " linha(s).")
   done <- scan_done(paths$processed)
   if (!opt$dry_run) {
+    say("Cruzando o registro com os tiles prontos e com a articulacao...")
     registry <- adopt_disk(registry, done, maquina(), usuario())
     registry <- fill_artic_on_registry(registry, idx)
+    say("Registro cruzado.")
   }
   done_ids <- if (opt$force) character() else done$tile_id
 
@@ -1419,8 +1509,15 @@ main <- function() {
     }
   }
   if (!opt$dry_run) {
+    say("Completando caminhos de LAZ no registro...")
     registry <- fill_laz_from_plan(registry, plan)
-    if (nrow(registry)) save_registry(paths$registry, registry)
+    if (nrow(registry)) {
+      say("Gravando registro: ", paths$registry)
+      save_registry(paths$registry, registry)
+      say("Registro gravado.")
+    } else {
+      say("Registro ainda vazio. Nada para gravar agora.")
+    }
   }
 
   cat("\n")
@@ -1457,6 +1554,7 @@ main <- function() {
 
   if (opt$dry_run) {
     modo <- if (opt$list_blocos) "lista" else "dry"
+    say("Gravando o plano, sem processar tile...")
     dest <- write_md(modo)
     if (!is.null(plan) && any(plan$acao == "processar")) {
       prev <- head(plan[acao == "processar"], 20L)
@@ -1475,8 +1573,9 @@ main <- function() {
 
   if (opt$report_only) {
     if (artic_ok && nrow(registry)) {
-      cat("Atualizando GPKG...\n")
+      say("Atualizando GPKG do registro...")
       rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
+      say("GPKG atualizado.")
     }
     dest <- write_md("report")
     cat("Relatorio: ", dest, "\n", sep = "")
