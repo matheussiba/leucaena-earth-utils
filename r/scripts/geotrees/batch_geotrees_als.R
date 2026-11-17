@@ -207,6 +207,8 @@ help_text <- function() {
     "  --name-job NOME       Padrao igc.",
     "",
     "Parar no meio: crie PARAR.txt em OUT_DIR (a checagem e entre tiles).",
+    "A primeira rodada grava o indice dos .laz e o da articulacao em OUT_DIR.",
+    "As seguintes reutilizam esses arquivos. Para reler a pasta, apague geotrees_als_laz_indice.csv.",
     "O GPKG da articulacao nao e alterado."
   )
 }
@@ -334,6 +336,10 @@ out_paths <- function(out_dir) {
     lock = file.path(out_dir, ".geotrees_als.lock"),
     runlog = file.path(out_dir, "geotrees_als_run.log"),
     artic_cache = file.path(out_dir, "articulacao_cache.gpkg"),
+    laz_index = file.path(out_dir, "geotrees_als_laz_indice.csv"),
+    laz_index_meta = file.path(out_dir, "geotrees_als_laz_indice_meta.csv"),
+    artic_index = file.path(out_dir, "geotrees_als_artic_indice.csv"),
+    artic_index_meta = file.path(out_dir, "geotrees_als_artic_indice_meta.csv"),
     parar = file.path(out_dir, "PARAR.txt")
   )
 }
@@ -507,7 +513,7 @@ load_historico <- function(path) {
   data.table::fread(path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE)
 }
 
-scan_done <- function(dir_processed) {
+scan_done <- function(dir_processed, known_ids = character()) {
   vazio <- data.table::data.table(tile_id = character(), pasta_saida = character(), finalizado_utc = character())
   say("Procurando tiles ja prontos em ", dir_processed)
   if (!dir.exists(dir_processed)) {
@@ -519,12 +525,34 @@ scan_done <- function(dir_processed) {
     say("  Nenhuma pasta de tile nesta saida.")
     return(vazio)
   }
-  say("  ", length(kids), " pasta(s) para conferir (_INFO_summary_processing.csv e sem _ERROR.txt).")
+  known <- new.env(hash = TRUE, parent = emptyenv())
+  if (length(known_ids)) {
+    for (id in unique(known_ids)) if (nzchar(id)) known[[id]] <- TRUE
+  }
+  say("  ", length(kids), " pasta(s) na saida. ", length(ls(known)), " ja estao no registro e nao serao abertas de novo.")
   rows <- vector("list", length(kids))
   n <- 0L
+  n_fast <- 0L
+  n_open <- 0L
   for (i in seq_along(kids)) {
     k <- kids[[i]]
-    say("  [", i, "/", length(kids), "] conferindo ", basename(k))
+    id <- toupper(basename(k))
+    if (exists(id, envir = known, inherits = FALSE)) {
+      if (!dir.exists(k)) next
+      n <- n + 1L
+      n_fast <- n_fast + 1L
+      rows[[n]] <- data.table::data.table(
+        tile_id = id,
+        pasta_saida = normalizePath(k, winslash = "/"),
+        finalizado_utc = ""
+      )
+      if (n_fast == 1L || n_fast %% 500L == 0L) {
+        say("  pasta ja registrada ", n_fast, ": ", id)
+      }
+      next
+    }
+    n_open <- n_open + 1L
+    say("  abrindo pasta nova ", id, " (", i, "/", length(kids), ")")
     info <- list.files(k, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE, full.names = TRUE)
     err <- list.files(k, pattern = "^_ERROR\\.txt$", recursive = TRUE)
     if (!length(info) || length(err)) {
@@ -534,13 +562,13 @@ scan_done <- function(dir_processed) {
     mt <- file.info(info[[1]])$mtime
     n <- n + 1L
     rows[[n]] <- data.table::data.table(
-      tile_id = toupper(basename(k)),
+      tile_id = id,
       pasta_saida = normalizePath(k, winslash = "/"),
       finalizado_utc = format(mt, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
     )
-    say("      pronto.")
+    say("      pronto. Adotado do disco.")
   }
-  say("Tiles prontos no disco: ", n, ".")
+  say("Tiles prontos no disco: ", n, " | reaproveitados do registro: ", n_fast, " | pastas abertas agora: ", n_open, ".")
   if (!n) return(vazio)
   data.table::rbindlist(rows[seq_len(n)])
 }
@@ -674,29 +702,123 @@ list_lidar <- function(root, out_dir) {
   unlist(found, use.names = FALSE)
 }
 
-make_plan <- function(files, idx, blocos, done_ids, limit, force) {
-  say("Montando o plano: ", length(files), " arquivo(s).")
+dedupe_lidar <- function(files) {
+  say("Montando o inventario: ", length(files), " arquivo(s).")
+  vazio <- data.table::data.table(
+    laz_path = character(), laz_nome = character(),
+    tile_id = character(), tamanho_mb = numeric()
+  )
+  if (!length(files)) return(list(dt = vazio, n_dup = 0L))
   files_dt <- data.table::data.table(laz_path = files)
   files_dt[, laz_nome := basename(laz_path)]
   files_dt[, tile_id := toupper(tools::file_path_sans_ext(laz_nome))]
   n <- nrow(files_dt)
   sizes <- numeric(n)
-  if (n) {
-    say("Lendo o tamanho de cada arquivo para descartar duplicata menor.")
-    chunk <- 200L
-    for (i in seq.int(1L, n, by = chunk)) {
-      j <- min(n, i + chunk - 1L)
-      info <- file.info(files_dt$laz_path[i:j])
-      sizes[i:j] <- ifelse(is.na(info$size), 0, info$size)
-      say("  tamanhos ", j, "/", n, " | ", files_dt$laz_nome[[j]])
-    }
+  say("Lendo o tamanho de cada arquivo para descartar duplicata menor. Isso so ocorre na primeira vez.")
+  chunk <- 200L
+  for (i in seq.int(1L, n, by = chunk)) {
+    j <- min(n, i + chunk - 1L)
+    info <- file.info(files_dt$laz_path[i:j])
+    sizes[i:j] <- ifelse(is.na(info$size), 0, info$size)
+    say("  tamanhos ", j, "/", n, " | ", files_dt$laz_nome[[j]])
   }
   files_dt[, tamanho_bytes := sizes]
   data.table::setorder(files_dt, tile_id, -tamanho_bytes)
-  n_dup <- nrow(files_dt) - data.table::uniqueN(files_dt$tile_id)
+  n_dup <- as.integer(nrow(files_dt) - data.table::uniqueN(files_dt$tile_id))
   files_dt <- files_dt[!duplicated(tile_id)]
   files_dt[, tamanho_mb := round(tamanho_bytes / 1024^2, 2)]
   files_dt[, tamanho_bytes := NULL]
+  say("Inventario unico: ", nrow(files_dt), " | duplicados deixados de lado: ", n_dup, ".")
+  list(dt = files_dt, n_dup = n_dup)
+}
+
+save_laz_index <- function(path, meta_path, inv, laz_dir) {
+  atomic_write(path, function(tmp) data.table::fwrite(inv$dt, tmp, bom = TRUE))
+  meta <- data.table::data.table(
+    laz_dir = laz_dir,
+    n_arquivos = nrow(inv$dt),
+    n_dup = inv$n_dup,
+    gravado_utc = utc_now()
+  )
+  atomic_write(meta_path, function(tmp) data.table::fwrite(meta, tmp, bom = TRUE))
+}
+
+load_laz_index <- function(path, meta_path, laz_dir) {
+  if (!file.exists(path) || !file.exists(meta_path)) return(NULL)
+  meta <- tryCatch(
+    data.table::fread(meta_path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(meta) || !nrow(meta) || !all(c("laz_dir", "n_dup") %in% names(meta))) return(NULL)
+  if (!identical(tolower(meta$laz_dir[[1]]), tolower(laz_dir))) {
+    say("O indice de LAZ salvo e de outra pasta. Vou ler ", laz_dir, " de novo.")
+    return(NULL)
+  }
+  dt <- tryCatch(
+    data.table::fread(path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
+    error = function(e) NULL
+  )
+  precisa <- c("laz_path", "laz_nome", "tile_id", "tamanho_mb")
+  if (is.null(dt) || !all(precisa %in% names(dt))) return(NULL)
+  dt <- dt[, ..precisa]
+  dt[, tamanho_mb := suppressWarnings(as.numeric(tamanho_mb))]
+  dt[, tile_id := toupper(trimws(tile_id))]
+  dt <- dt[nzchar(tile_id) & nzchar(laz_path)]
+  n_dup <- suppressWarnings(as.integer(meta$n_dup[[1]]))
+  if (is.na(n_dup)) n_dup <- 0L
+  say("Indice de LAZ da primeira leitura: ", nrow(dt), " tile(s). O tamanho nao sera lido de novo.")
+  say("  ", path)
+  say("Para forcar outra leitura da pasta, apague esse arquivo.")
+  list(dt = dt, n_dup = n_dup)
+}
+
+file_stamp <- function(path) {
+  info <- file.info(path)
+  paste0(sprintf("%.0f", ifelse(is.na(info$size), -1, info$size)), "|", sprintf("%.3f", as.numeric(info$mtime)))
+}
+
+save_artic_index <- function(path, meta_path, idx, artic_path) {
+  atomic_write(path, function(tmp) data.table::fwrite(idx, tmp, bom = TRUE))
+  meta <- data.table::data.table(
+    artic_path = artic_path,
+    stamp = file_stamp(artic_path),
+    n_ids = nrow(idx),
+    gravado_utc = utc_now()
+  )
+  atomic_write(meta_path, function(tmp) data.table::fwrite(meta, tmp, bom = TRUE))
+}
+
+load_artic_index <- function(path, meta_path, artic_path) {
+  if (!file.exists(path) || !file.exists(meta_path) || !file.exists(artic_path)) return(NULL)
+  meta <- tryCatch(
+    data.table::fread(meta_path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(meta) || !nrow(meta) || !all(c("artic_path", "stamp") %in% names(meta))) return(NULL)
+  if (!identical(tolower(meta$artic_path[[1]]), tolower(artic_path))) return(NULL)
+  if (!identical(meta$stamp[[1]], file_stamp(artic_path))) {
+    say("A articulacao mudou desde o indice salvo. Vou le-la de novo.")
+    return(NULL)
+  }
+  idx <- tryCatch(
+    data.table::fread(path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
+    error = function(e) NULL
+  )
+  precisa <- c("tile_id", "via", "bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k")
+  if (is.null(idx) || !all(precisa %in% names(idx))) return(NULL)
+  say("Indice da articulacao da primeira leitura: ", nrow(idx), " id(s). O GPKG nao sera lido de novo.")
+  say("  ", path)
+  idx[, ..precisa]
+}
+
+make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L) {
+  if (is.null(files_dt)) {
+    files_dt <- data.table::data.table(
+      laz_path = character(), laz_nome = character(),
+      tile_id = character(), tamanho_mb = numeric()
+    )
+  }
+  say("Montando o plano: ", nrow(files_dt), " tile(s) unicos.")
 
   if (nrow(idx)) {
     plan <- merge(files_dt, idx, by = "tile_id", all.x = TRUE, sort = FALSE)
@@ -1488,18 +1610,27 @@ main <- function() {
     cat("O GPKG fica em data/articulacao_igc_sp/ dentro do clone:\n")
     cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
   } else {
-    say("Lendo articulacao (atributos): ", opt$articulacao)
-    artic_tab <- read_artic_table(opt$articulacao, opt$articulacao_layer)
-    say("Montando o indice NOMENC_2K / NOMENC_5K / NOMENC_10K...")
-    idx <- build_index(artic_tab)
+    cached_idx <- load_artic_index(paths$artic_index, paths$artic_index_meta, opt$articulacao)
+    if (!is.null(cached_idx)) {
+      idx <- cached_idx
+    } else {
+      say("Lendo articulacao (atributos): ", opt$articulacao)
+      artic_tab <- read_artic_table(opt$articulacao, opt$articulacao_layer)
+      say("Montando o indice NOMENC_2K / NOMENC_5K / NOMENC_10K...")
+      idx <- build_index(artic_tab)
+      save_artic_index(paths$artic_index, paths$artic_index_meta, idx, opt$articulacao)
+      say("Indice da articulacao gravado. Na proxima rodada o GPKG nao e lido de novo.")
+      say("  ", paths$artic_index)
+    }
     say("IDs indexados: ", nrow(idx), ".")
-    say("Agora o script varre a pasta de LAZ e a saida. Ainda nao comecou tile nenhum.")
   }
 
   say("Lendo registro: ", paths$registry)
   registry <- load_registry(paths$registry)
   say("Registro: ", nrow(registry), " linha(s).")
-  done <- scan_done(paths$processed)
+  known_ids <- if (nrow(registry)) as.character(registry[status == "processed", tile_id]) else character()
+  known_ids <- known_ids[!is.na(known_ids) & nzchar(known_ids)]
+  done <- scan_done(paths$processed, known_ids)
   if (!opt$dry_run) {
     say("Cruzando o registro com os tiles prontos e com a articulacao...")
     registry <- adopt_disk(registry, done, maquina(), usuario())
@@ -1517,8 +1648,20 @@ main <- function() {
   }
   if (!opt$report_only || dir.exists(opt$laz_dir)) {
     if (dir.exists(opt$laz_dir)) {
-      files <- list_lidar(opt$laz_dir, paths$root)
-      plan <- make_plan(files, idx, blocos, done_ids, if (opt$report_only) 0L else opt$limit, opt$force)
+      laz_dir_n <- normalizePath(opt$laz_dir, winslash = "/", mustWork = TRUE)
+      inv <- load_laz_index(paths$laz_index, paths$laz_index_meta, laz_dir_n)
+      if (is.null(inv)) {
+        say("Primeira leitura desta pasta de LAZ. As proximas rodadas usam o indice gravado.")
+        files <- list_lidar(laz_dir_n, paths$root)
+        inv <- dedupe_lidar(files)
+        save_laz_index(paths$laz_index, paths$laz_index_meta, inv, laz_dir_n)
+        say("Indice de LAZ gravado. Na proxima rodada o tamanho dos arquivos nao e lido de novo.")
+        say("  ", paths$laz_index)
+      }
+      plan <- make_plan(
+        inv$dt, idx, blocos, done_ids,
+        if (opt$report_only) 0L else opt$limit, opt$force, inv$n_dup
+      )
       n_dup <- attr(plan, "n_dup")
       if (is.null(n_dup)) n_dup <- 0L
     }
