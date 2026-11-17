@@ -67,6 +67,20 @@ echo Usando: %RS%
 echo Argumentos extras: %*
 echo.
 
+if not exist "%LAZ_DIR%\" (
+    echo [ERRO] Pasta de LAZ nao existe: %LAZ_DIR%
+    echo.
+    pause
+    exit /b 2
+)
+if not exist "%OUT_DIR:~0,2%\" (
+    echo [ERRO] O disco da saida nao esta acessivel: %OUT_DIR%
+    echo Confira se o disco G: esta conectado.
+    echo.
+    pause
+    exit /b 2
+)
+
 set "BLOCO_ARG="
 set "CORES_ARG="
 set "LIMIT_ARG="
@@ -74,16 +88,28 @@ set "ARTIC_ARG="
 if defined BLOCO set "BLOCO_ARG=--bloco %BLOCO%"
 if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
 if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
-if defined ARTICULACAO set "ARTIC_ARG=--articulacao %ARTICULACAO%"
+if defined ARTICULACAO set "ARTIC_ARG=--articulacao "%ARTICULACAO%""
+
+echo Comando:
+echo "%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %*
+echo.
 
 "%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.
-echo Terminou com codigo %RC%.
+if not "%RC%"=="0" (
+    echo [ERRO] O script terminou com codigo %RC%.
+    echo Leia as linhas acima. Esta janela fica aberta.
+) else (
+    echo Terminou com codigo 0.
+)
 echo Relatorio: %OUT_DIR%\geotrees_als_relatorio.md
 echo Registro:  %OUT_DIR%\geotrees_als_registry.csv
 echo GPKG:      %OUT_DIR%\geotrees_als_registro.gpkg
 echo.
 echo Se parou no meio ou deu erro em algum tile, rode este .bat de novo.
-echo O que ja terminou nesta maquina nao sera r
+echo O que ja terminou nesta maquina nao sera refeito.
+echo.
+pause
+exit /b %RC%
