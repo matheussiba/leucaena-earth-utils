@@ -9,8 +9,9 @@ REM  Edite aqui. O resto pode ir na linha de comando.
 REM  BLOCO vazio = todos os .laz/.las da pasta.
 REM  Um bloco:    set "BLOCO=EF"
 REM  Dois blocos: set "BLOCO=EF,2024"
-REM  ARTICULACAO vazio = articulacao-igc-merged-spatialindex-sirgas2000.gpkg
-REM  na mesma pasta deste .bat, sem subpasta.
+REM  ARTICULACAO vazio = data\articulacao_igc_sp\
+REM  articulacao-igc-merged-spatialindex-sirgas2000.gpkg
+REM  dentro do clone do repositorio.
 REM =====================================================================
 set "LAZ_DIR=D:\laz"
 set "BLOCO="

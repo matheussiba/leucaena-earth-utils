@@ -37,6 +37,9 @@ echo.
 %PY% -u "%~dp0build_rgbnir_from_rgb_ir.py" %*
 set "RC=%ERRORLEVEL%"
 
+REM 3 = outra copia ja segura a trava. Fecha esta janela sem pause.
+if "%RC%"=="3" exit /b 3
+
 echo.
 echo Terminou com codigo %RC%.
 echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
