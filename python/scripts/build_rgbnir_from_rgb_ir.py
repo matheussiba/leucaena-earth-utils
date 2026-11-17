@@ -44,6 +44,8 @@ leave a half-written GPKG. Articulation polygons come from
 
 Queue order: pending pairs with matching RGB/IR grids (direct NIR copy)
 run first; pairs that need ``-resampled`` run only after those finish.
+The direto/resampled classification is cached in ``rgbnir_grade_vistoria.csv``
+so later runs reuse it and only probe new pairs (unless ``--force-grade``).
 
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
@@ -126,12 +128,13 @@ SUMMARY_NAME = "rgbnir_summary.csv"
 REGISTRY_NAME = "rgbnir_registry.csv"
 DICTIONARY_NAME = "rgbnir_registry_dicionario.csv"
 SP_VISTORIA_NAME = "rgbnir_sp_vistoria.csv"
+GRADE_VISTORIA_NAME = "rgbnir_grade_vistoria.csv"
 COBERTURA_NAME = "rgbnir_cobertura.gpkg"
 COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 
 # Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
 _ID_COLUMN_BY_LAYER = {
@@ -313,11 +316,55 @@ def fmt_size(num_bytes: float | int | None) -> str:
 
 def fmt_duration(seconds: float) -> str:
     total = int(max(0.0, seconds))
-    minutes, secs = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours:02d}h {minutes:02d}m"
     if hours:
         return f"{hours}h {minutes:02d}m {secs:02d}s"
     return f"{minutes:02d}m {secs:02d}s"
+
+
+def _to_int_bytes(value: object) -> int:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
+def folder_size_bytes(folder: Path) -> int:
+    """Sum file sizes under ``folder`` (RGBNIR tree, including sidecars/CSV)."""
+    total = 0
+    if not folder.is_dir():
+        return 0
+    for dirpath, _dirnames, filenames in os.walk(folder):
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def average_saida_bytes(rows: list[dict[str, str]]) -> int:
+    sizes = [_to_int_bytes(row.get("saida_bytes")) for row in rows if _to_int_bytes(row.get("saida_bytes")) > 0]
+    if not sizes:
+        return 0
+    return int(sum(sizes) / len(sizes))
+
+
+def estimate_row_output_bytes(row: dict[str, str], avg_saida: int) -> int:
+    known = _to_int_bytes(row.get("saida_bytes"))
+    if known > 0:
+        return known
+    if avg_saida > 0:
+        return avg_saida
+    # Rough fallback before any output exists: RGB+IR input is a weak proxy.
+    return max(_to_int_bytes(row.get("rgb_bytes")) + _to_int_bytes(row.get("ir_bytes")), 0)
 
 
 def blank_row() -> dict[str, str]:
@@ -2162,17 +2209,139 @@ def tipo_juncao_for_row(row: dict[str, str], *, alinhamento: str | None = None) 
     return status or tipo or "desconhecido"
 
 
-def prioritize_queue_direto_then_resampled(queue: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Process same-grid pairs first; only then pairs that need NIR resampling."""
+_GRADE_VISTORIA_COLUMNS = [
+    "chave",
+    "rgb_caminho",
+    "ir_caminho",
+    "rgb_bytes",
+    "ir_bytes",
+    "alinhamento",
+    "saida_nome",
+    "atualizado_utc",
+]
+_GRADE_OK = {_TIPO_JUNCAO_DIRETOS, _TIPO_JUNCAO_RESAMPLED}
+
+
+def grade_cache_key(rgb_path: str, ir_path: str) -> str:
+    return f"{(rgb_path or '').casefold()}|{(ir_path or '').casefold()}"
+
+
+def load_grade_vistoria(path: Path) -> dict[str, dict[str, str]]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            cache: dict[str, dict[str, str]] = {}
+            for row in csv.DictReader(handle):
+                chave = (row.get("chave") or "").strip()
+                align = (row.get("alinhamento") or "").strip()
+                if not chave or align not in _GRADE_OK:
+                    continue
+                cache[chave] = row
+            return cache
+    except OSError as exc:
+        log(f"AVISO: nao li a vistoria de grade {path}: {exc}")
+        return {}
+
+
+def save_grade_vistoria(path: Path, cache: dict[str, dict[str, str]]) -> None:
+    rows = sorted(cache.values(), key=lambda row: (row.get("chave") or "").casefold())
+    if write_csv_atomic(path, _GRADE_VISTORIA_COLUMNS, rows):
+        log(f"Vistoria de grade salva: {path} ({len(rows)} par(es)). Proximas execucoes reaproveitam.")
+
+
+def _grade_cache_valid(entry: dict[str, str], row: dict[str, str]) -> bool:
+    if (entry.get("alinhamento") or "") not in _GRADE_OK:
+        return False
+    rgb_b = str(_to_int_bytes(row.get("rgb_bytes")))
+    ir_b = str(_to_int_bytes(row.get("ir_bytes")))
+    return (entry.get("rgb_bytes") or "0") == rgb_b and (entry.get("ir_bytes") or "0") == ir_b
+
+
+def store_grade_result(
+    cache: dict[str, dict[str, str]],
+    row: dict[str, str],
+    alinhamento: str,
+    *,
+    saida_nome: str = "",
+) -> None:
+    if alinhamento not in _GRADE_OK:
+        return
+    rgb = row.get("rgb_caminho") or ""
+    ir = row.get("ir_caminho") or ""
+    if not rgb or not ir:
+        return
+    cache[grade_cache_key(rgb, ir)] = {
+        "chave": grade_cache_key(rgb, ir),
+        "rgb_caminho": rgb,
+        "ir_caminho": ir,
+        "rgb_bytes": str(_to_int_bytes(row.get("rgb_bytes"))),
+        "ir_bytes": str(_to_int_bytes(row.get("ir_bytes"))),
+        "alinhamento": alinhamento,
+        "saida_nome": saida_nome or (row.get("saida_nome") or ""),
+        "atualizado_utc": utc_now(),
+    }
+
+
+def seed_grade_cache_from_finished(
+    rows: list[dict[str, str]],
+    cache: dict[str, dict[str, str]],
+) -> int:
+    """Fill cache from finished outputs (filename) without opening RGB/IR headers."""
+    added = 0
+    for row in rows:
+        if row.get("tipo_registro") != "par":
+            continue
+        if row.get("status") not in {"ok", "pulado_ja_existe"}:
+            continue
+        align = infer_alinhamento_from_saida(row.get("saida_nome") or "", row.get("detalhe") or "")
+        if align not in _GRADE_OK:
+            continue
+        key = grade_cache_key(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
+        if not key or key == "|":
+            continue
+        if key in cache and _grade_cache_valid(cache[key], row):
+            continue
+        store_grade_result(cache, row, align, saida_nome=row.get("saida_nome") or "")
+        added += 1
+    return added
+
+
+def prioritize_queue_direto_then_resampled(
+    queue: list[dict[str, str]],
+    *,
+    cache: dict[str, dict[str, str]],
+    cache_path: Path,
+    force: bool = False,
+) -> list[dict[str, str]]:
+    """Order queue as direct-copy first, then resampled.
+
+    Grid classification is cached in ``rgbnir_grade_vistoria.csv``. Only pairs
+    missing from the cache (or with changed source sizes) are probed again.
+    """
     if not queue:
         return queue
-    log("Classificando a fila: copia direta (mesma grade) primeiro; resampled depois...")
     direto: list[dict[str, str]] = []
     resampled: list[dict[str, str]] = []
     desconhecido: list[dict[str, str]] = []
+    reused = 0
+    probed = 0
     started = time.time()
+    log(
+        "Ordenando a fila (direto primeiro, resampled depois). "
+        "Vistoria de grade so para pares novos/ausentes no cache."
+    )
     for index, row in enumerate(queue, 1):
-        align = probe_alinhamento(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
+        key = grade_cache_key(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
+        entry = cache.get(key)
+        if not force and entry and _grade_cache_valid(entry, row):
+            align = entry["alinhamento"]
+            reused += 1
+        else:
+            align = probe_alinhamento(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
+            probed += 1
+            if align in _GRADE_OK:
+                store_grade_result(cache, row, align)
         row["_fila_alinhamento"] = align
         if align == _TIPO_JUNCAO_DIRETOS:
             direto.append(row)
@@ -2180,22 +2349,158 @@ def prioritize_queue_direto_then_resampled(queue: list[dict[str, str]]) -> list[
             resampled.append(row)
         else:
             desconhecido.append(row)
-        if index % 500 == 0 or index == len(queue):
+        if probed and (probed % 500 == 0):
             log(
-                f"  ... vistoria de grade {index}/{len(queue)} "
-                f"(direto={len(direto)} resampled={len(resampled)} "
-                f"desconhecido={len(desconhecido)}) "
-                f"em {fmt_duration(time.time() - started)}"
+                f"  ... novas vistorias de grade: {probed} "
+                f"(reaproveitadas={reused}) em {fmt_duration(time.time() - started)}"
             )
+    if probed or force:
+        save_grade_vistoria(cache_path, cache)
+    elif reused:
+        log(f"Vistoria de grade: reaproveitei {reused} par(es) de {cache_path} (0 novas leituras de cabecalho).")
     ordered = direto + desconhecido + resampled
     log("=" * 78)
     log("ORDEM DA FILA NESTA EXECUCAO")
     log(f"  1) Copia direta (mesma grade RGB/IR):     {len(direto)}")
     log(f"  2) Grade ainda nao classificada:          {len(desconhecido)}")
     log(f"  3) Precisa resampled (grades diferentes): {len(resampled)}")
+    log(f"  Cache: reaproveitadas={reused} | novas vistorias={probed}")
     log("  Os ja gravados em disco continuam pulados; so estes da fila serao escritos.")
     log("=" * 78)
     return ordered
+
+
+@dataclass
+class RunProgress:
+    """Rolling % / ETA / disk estimates updated after each finished tile."""
+
+    out_dir: Path
+    grand_total: int
+    already_done: int
+    queue_total: int
+    folder_bytes_start: int
+    avg_saida_bytes: int
+    pending_bytes_est_start: int
+    free_bytes_start: int
+    total_disk_bytes: int
+    session_out_bytes: int = 0
+    session_ok: int = 0
+
+    def note_success(self, saida_bytes: int) -> None:
+        size = max(0, int(saida_bytes))
+        self.session_out_bytes += size
+        self.session_ok += 1
+        if self.session_ok >= 3:
+            # Stabilize average with new outputs from this run.
+            blended = int(
+                (self.avg_saida_bytes * max(self.already_done, 1) + self.session_out_bytes)
+                / max(self.already_done + self.session_ok, 1)
+            )
+            if blended > 0:
+                self.avg_saida_bytes = blended
+
+    def log_snapshot(self, *, position: int, session_done: int, session_total: int, elapsed: float) -> None:
+        pct = (100.0 * position / self.grand_total) if self.grand_total else 100.0
+        remaining_session = max(session_total - session_done, 0)
+        remaining_overall = max(self.grand_total - position, 0)
+
+        eta_count = None
+        if session_done > 0 and remaining_session > 0:
+            eta_count = (elapsed / session_done) * remaining_session
+
+        eta_bytes = None
+        if self.session_out_bytes > 0 and elapsed > 0 and remaining_session > 0:
+            avg_now = self.session_out_bytes / max(self.session_ok, 1)
+            remaining_bytes = avg_now * remaining_session
+            rate = self.session_out_bytes / elapsed
+            if rate > 0:
+                eta_bytes = remaining_bytes / rate
+
+        if eta_count is not None and eta_bytes is not None:
+            # Weight toward size-based ETA as more bytes accumulate.
+            w = min(0.8, self.session_ok / 20.0)
+            eta = (1.0 - w) * eta_count + w * eta_bytes
+            eta_txt = fmt_duration(eta)
+        elif eta_bytes is not None:
+            eta_txt = fmt_duration(eta_bytes)
+        elif eta_count is not None:
+            eta_txt = fmt_duration(eta_count)
+        else:
+            eta_txt = "calculando"
+
+        folder_now = self.folder_bytes_start + self.session_out_bytes
+        pending_left = max(remaining_overall, 0)
+        pending_bytes = (self.avg_saida_bytes * pending_left) if self.avg_saida_bytes > 0 else 0
+        projected_total = folder_now + pending_bytes
+        try:
+            free_now = shutil.disk_usage(self.out_dir).free
+        except OSError:
+            free_now = self.free_bytes_start
+
+        log(
+            f"Progresso geral {position}/{self.grand_total} ({pct:.2f}%) | "
+            f"nesta execucao {session_done}/{session_total} | "
+            f"ETA restante ~ {eta_txt} | decorrido {fmt_duration(elapsed)}"
+        )
+        log(
+            f"Disco {self.out_dir.drive or self.out_dir}: "
+            f"pasta RGBNIR agora ~ {fmt_size(folder_now)} | "
+            f"media/tile ~ {fmt_size(self.avg_saida_bytes) if self.avg_saida_bytes else 'n/d'} | "
+            f"falta estimar ~ {fmt_size(pending_bytes)} ({pending_left} tiles) | "
+            f"total projetado ~ {fmt_size(projected_total)} | "
+            f"livre agora {fmt_size(free_now)}"
+        )
+        if pending_bytes > 0 and free_now < pending_bytes:
+            log(
+                f"AVISO: espaco livre ({fmt_size(free_now)}) < estimativa do que falta "
+                f"({fmt_size(pending_bytes)}). Libere disco ou mova dados."
+            )
+
+
+def build_run_progress(
+    *,
+    out_dir: Path,
+    pairs: list[dict[str, str]],
+    skipped: list[dict[str, str]],
+    queue: list[dict[str, str]],
+) -> RunProgress:
+    log("Medindo tamanho atual de G:\\RGBNIR para estimativa de disco/tempo...")
+    folder_bytes = folder_size_bytes(out_dir)
+    avg = average_saida_bytes(skipped)
+    if avg <= 0 and skipped:
+        avg = int(folder_bytes / max(len(skipped), 1))
+    pending_bytes = sum(estimate_row_output_bytes(row, avg) for row in queue)
+    try:
+        usage = shutil.disk_usage(out_dir)
+        free_b, total_b = usage.free, usage.total
+    except OSError:
+        free_b, total_b = 0, 0
+    projected = folder_bytes + pending_bytes
+    log(
+        f"  Pasta saida agora: {fmt_size(folder_bytes)} | "
+        f"ja prontos: {len(skipped)} | fila: {len(queue)} | "
+        f"media saida: {fmt_size(avg) if avg else 'n/d'}"
+    )
+    log(
+        f"  Estimativa do que falta gravar: ~ {fmt_size(pending_bytes)} | "
+        f"total projetado na pasta: ~ {fmt_size(projected)} | "
+        f"livre no disco: {fmt_size(free_b)}"
+    )
+    if pending_bytes > 0 and free_b and free_b < pending_bytes:
+        log(
+            f"  AVISO: livre ({fmt_size(free_b)}) < falta estimar ({fmt_size(pending_bytes)})."
+        )
+    return RunProgress(
+        out_dir=out_dir,
+        grand_total=len(pairs),
+        already_done=len(skipped),
+        queue_total=len(queue),
+        folder_bytes_start=folder_bytes,
+        avg_saida_bytes=avg,
+        pending_bytes_est_start=pending_bytes,
+        free_bytes_start=free_b,
+        total_disk_bytes=total_b,
+    )
 
 
 def _align_nir_to_rgb_window(ir_src, nir_band: int, window, rgb_transform, rgb_crs, src_nodata, dst_nodata):
@@ -2567,6 +2872,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--force-grade",
+        action="store_true",
+        help=(
+            "Refaz a vistoria de grade (direto vs resampled) em todos os pares pendentes. "
+            f"Sem esta opcao, reaproveita {GRADE_VISTORIA_NAME} e so inspeciona pares novos."
+        ),
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -2628,6 +2941,13 @@ def _print_banner(args: argparse.Namespace, run_id: str, gdal_threads: int) -> N
     else:
         log(f"Cobertura GPKG -> {Path(args.out) / COBERTURA_NAME}")
         log(f"Articulacao cobertura -> {args.articulacao} | layer={args.articulacao_layer}")
+    if getattr(args, "force_grade", False):
+        log("Vistoria de grade -> FORCADA em todos os pares pendentes.")
+    else:
+        log(
+            f"Vistoria de grade -> reaproveita {Path(args.out) / GRADE_VISTORIA_NAME}; "
+            "so pares novos/ausentes sao abertos."
+        )
     log(
         "Retomada: se este script parar, rode o .bat de novo. "
         f"O que ja estiver em {args.out} com tamanho > 0 e pulado."
@@ -2844,6 +3164,9 @@ def _run_queue(
     already_done: int,
     grand_total: int,
     cobertura: RgbnirCobertura | None = None,
+    progress: RunProgress | None = None,
+    grade_cache: dict[str, dict[str, str]] | None = None,
+    grade_cache_path: Path | None = None,
 ) -> str:
     """Fuse the queue. Returns 'ok', 'falha' or 'interrompido'.
 
@@ -2856,12 +3179,21 @@ def _run_queue(
     written = 0
     failed = 0
     outcome = "ok"
+    grade_dirty = False
 
     def remember(row: dict[str, str], result: dict, position: int) -> None:
-        nonlocal written, failed
+        nonlocal written, failed, grade_dirty
         apply_result(row, result, run_id=run_id, out_dir=out_dir)
         if result["status"] == "ok":
             written += 1
+            align = infer_alinhamento_from_saida(row.get("saida_nome") or "", row.get("detalhe") or "")
+            if align in _GRADE_OK:
+                row["_fila_alinhamento"] = align
+                if grade_cache is not None:
+                    store_grade_result(grade_cache, row, align, saida_nome=row.get("saida_nome") or "")
+                    grade_dirty = True
+            if progress is not None:
+                progress.note_success(_to_int_bytes(row.get("saida_bytes") or result.get("saida_bytes")))
             if cobertura is not None:
                 if cobertura.add_from_registry_row(row, out_dir):
                     log(f"Cobertura +1 -> {out_dir / COBERTURA_NAME} ({row.get('saida_nome')})")
@@ -2870,17 +3202,25 @@ def _run_queue(
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
         done = written + failed
         elapsed = time.time() - started
-        if done:
-            eta = (elapsed / done) * (total - done)
-            eta_txt = fmt_duration(eta)
+        if progress is not None:
+            progress.log_snapshot(
+                position=position,
+                session_done=done,
+                session_total=total,
+                elapsed=elapsed,
+            )
         else:
-            eta_txt = "calculando"
-        log(
-            f"Progresso {position}/{grand_total} | nesta execucao {done}/{total} | "
-            f"gravados {written} | falhas {failed} | "
-            f"restam na fila {total - done} | ETA {eta_txt} | decorrido {fmt_duration(elapsed)}"
-        )
+            eta_txt = fmt_duration((elapsed / done) * (total - done)) if done else "calculando"
+            pct = (100.0 * position / grand_total) if grand_total else 100.0
+            log(
+                f"Progresso {position}/{grand_total} ({pct:.2f}%) | nesta execucao {done}/{total} | "
+                f"gravados {written} | falhas {failed} | "
+                f"restam na fila {total - done} | ETA {eta_txt} | decorrido {fmt_duration(elapsed)}"
+            )
         log(f"CSV atualizado: {out_dir / SUMMARY_NAME}")
+        if grade_dirty and grade_cache is not None and grade_cache_path is not None and done % 25 == 0:
+            save_grade_vistoria(grade_cache_path, grade_cache)
+            grade_dirty = False
 
     settings_base = {
         "nir_band": nir_band,
@@ -2913,10 +3253,14 @@ def _run_queue(
                 row["ultimo_erro"] = row["detalhe"]
                 row["notas"] = ""
                 publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
+                if grade_dirty and grade_cache is not None and grade_cache_path is not None:
+                    save_grade_vistoria(grade_cache_path, grade_cache)
                 log("Interrompido pelo usuario. O que ja estava pronto foi mantido.")
                 log("Rode o .bat de novo para continuar do que falta.")
                 return "interrompido"
             remember(row, result, position)
+        if grade_dirty and grade_cache is not None and grade_cache_path is not None:
+            save_grade_vistoria(grade_cache_path, grade_cache)
         return "falha" if failed else "ok"
 
     log(f"Fila paralela com {workers} processos. As linhas de tiles diferentes vao se misturar; cada uma traz o id do tile.")
@@ -2968,9 +3312,13 @@ def _run_queue(
                 row["detalhe"] = "Execucao interrompida antes de terminar este tile."
                 row["notas"] = ""
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
+        if grade_dirty and grade_cache is not None and grade_cache_path is not None:
+            save_grade_vistoria(grade_cache_path, grade_cache)
         return "interrompido"
     else:
         executor.shutdown(wait=True)
+    if grade_dirty and grade_cache is not None and grade_cache_path is not None:
+        save_grade_vistoria(grade_cache_path, grade_cache)
     return "falha" if failed else outcome
 
 
@@ -3172,15 +3520,43 @@ def main(argv: list[str] | None = None) -> int:
         if cobertura is not None:
             cobertura.sync_missing_from_rows(skipped + [r for r in pairing.pairs if r.get("status") == "ok"], out_dir)
 
-        if queue and not args.dry_run:
-            queue = prioritize_queue_direto_then_resampled(queue)
+        grade_path = out_dir / GRADE_VISTORIA_NAME
+        grade_cache = load_grade_vistoria(grade_path)
+        if grade_cache:
+            log(f"Vistoria de grade em cache: {len(grade_cache)} par(es) em {grade_path}")
+        seeded = seed_grade_cache_from_finished(skipped, grade_cache)
+        if seeded:
+            save_grade_vistoria(grade_path, grade_cache)
+            log(f"Cache de grade: {seeded} par(es) ja prontos inferidos pelo nome da saida (sem reabrir RGB/IR).")
 
+        progress: RunProgress | None = None
+        if queue and not args.dry_run:
+            queue = prioritize_queue_direto_then_resampled(
+                queue,
+                cache=grade_cache,
+                cache_path=grade_path,
+                force=bool(args.force_grade),
+            )
+            progress = build_run_progress(
+                out_dir=out_dir,
+                pairs=pairing.pairs,
+                skipped=skipped,
+                queue=queue,
+            )
+
+        ready_now = len(skipped)
+        total_pairs = len(pairing.pairs)
+        pct_now = (100.0 * ready_now / total_pairs) if total_pairs else 100.0
         _print_scenario_audit(
             all_rows,
             rgb_all_count=len(rgb_all),
             ir_all_count=len(ir_all),
             skipped=skipped,
             queue=queue,
+        )
+        log(
+            f"Andamento ja em disco: {ready_now}/{total_pairs} ({pct_now:.2f}%). "
+            "ETA e disco serao recalculados a cada tile gravado."
         )
         _print_pair_plan(pairing.pairs, queue, skipped)
         _print_leftovers(all_rows)
@@ -3208,7 +3584,7 @@ def main(argv: list[str] | None = None) -> int:
         log(
             f"Comecando a gravar {len(queue)} tile(s) "
             f"(direto={n_dir}, resampled/outros={len(queue) - n_dir}; resampled na fila={n_res}). "
-            f"Contador: {proximo}/{len(pairing.pairs)} "
+            f"Contador: {proximo}/{len(pairing.pairs)} ({pct_now:.2f}% ja pronto) "
             f"({len(skipped)} ja estavam em disco e NAO serao refeitos)."
         )
         outcome = _run_queue(
@@ -3225,6 +3601,9 @@ def main(argv: list[str] | None = None) -> int:
             already_done=len(skipped),
             grand_total=len(pairing.pairs),
             cobertura=cobertura,
+            progress=progress,
+            grade_cache=grade_cache,
+            grade_cache_path=grade_path,
         )
         _print_final(all_rows, out_dir, started)
         if outcome == "interrompido":
