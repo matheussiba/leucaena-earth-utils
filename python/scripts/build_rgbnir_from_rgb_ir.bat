@@ -6,6 +6,8 @@ chcp 65001 >nul
 set "PYTHONUNBUFFERED=1"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
+REM Evita o CMD "congelar" o print ate clicar/redimensionar (Quick Edit).
+reg add "HKCU\Console" /v QuickEdit /t REG_DWORD /d 0 /f >nul 2>&1
 
 echo ============================================================
 echo  RGB + IR  -^>  RGBNIR de 4 bandas

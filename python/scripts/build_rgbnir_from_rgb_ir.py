@@ -110,10 +110,12 @@ DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 DEFAULT_SP_BOUNDS = str(_DATA_DIR / "sp-bounds.gpkg")
-DEFAULT_ARTICULACAO = (
-    r"C:\Users\admin\Documents\Projetos_Matheus_Barros\msb-phd-leucaena-sp.gpkg"
+DEFAULT_ARTICULACAO = str(
+    _DATA_DIR / "articulacao_igc_sp" / "articulacao-igc-merged-spatialindex-sirgas2000.gpkg"
 )
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
+# Filename suffix when the TIFF CRS is remapped via articulacao.epsg (user spelling).
+PROJETION_ASSIGNED_SUFFIX = "-projetion_assigned"
 
 # False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
 # True compares every RGB and IR against Sao Paulo again.
@@ -134,7 +136,7 @@ COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 # Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
 _ID_COLUMN_BY_LAYER = {
@@ -576,21 +578,59 @@ def output_name_for_scenario(tile_id: str, cenario: int, tipo_rgb: str, tipo_ir:
     return f"{base}.tif"
 
 
+def _strip_known_output_suffixes(stem: str) -> str:
+    text = stem
+    changed = True
+    while changed:
+        changed = False
+        lower = text.casefold()
+        for suffix in (
+            PROJETION_ASSIGNED_SUFFIX,
+            "-resampled",
+            "_resampled",
+        ):
+            if lower.endswith(suffix.casefold()):
+                text = text[: -len(suffix)]
+                changed = True
+                break
+    return text
+
+
+def apply_output_suffixes(
+    plain_name: str,
+    *,
+    resampled: bool = False,
+    projetion_assigned: bool = False,
+) -> str:
+    """Build the final filename. Both suffixes may appear together."""
+    path = Path(plain_name)
+    stem = _strip_known_output_suffixes(path.stem)
+    if resampled:
+        stem = f"{stem}-resampled"
+    if projetion_assigned:
+        stem = f"{stem}{PROJETION_ASSIGNED_SUFFIX}"
+    return f"{stem}{path.suffix or '.tif'}"
+
+
 def resampled_output_name(plain_name: str) -> str:
     """Name used only when the IR grid has to be aligned onto the RGB grid."""
-    path = Path(plain_name)
-    stem = path.stem
-    if stem.endswith("-resampled") or stem.endswith("_resampled"):
-        stem = stem[: -len("-resampled")] if stem.endswith("-resampled") else stem[: -len("_resampled")]
-    return f"{stem}-resampled{path.suffix or '.tif'}"
+    return apply_output_suffixes(plain_name, resampled=True, projetion_assigned=False)
 
 
 def finished_output(out_dir: Path, plain_name: str) -> Path | None:
-    """An existing final TIFF for this pair, under the plain or resampled name."""
-    plain = out_dir / plain_name
-    resampled = out_dir / resampled_output_name(plain_name)
-    legacy = out_dir / f"{Path(plain_name).stem}_resampled{Path(plain_name).suffix or '.tif'}"
-    for path in (plain, resampled, legacy):
+    """An existing final TIFF for this pair (plain / resampled / projetion_assigned)."""
+    stem = _strip_known_output_suffixes(Path(plain_name).stem)
+    suffix = Path(plain_name).suffix or ".tif"
+    base = f"{stem}{suffix}"
+    candidates = [
+        out_dir / base,
+        out_dir / apply_output_suffixes(base, resampled=True),
+        out_dir / apply_output_suffixes(base, projetion_assigned=True),
+        out_dir / apply_output_suffixes(base, resampled=True, projetion_assigned=True),
+        out_dir / f"{stem}_resampled{suffix}",
+        out_dir / f"{stem}_resampled{PROJETION_ASSIGNED_SUFFIX}{suffix}",
+    ]
+    for path in candidates:
         if output_is_done(path):
             return path
     return None
@@ -665,6 +705,47 @@ def scan_rasters(folder: Path) -> list[RasterHit]:
 _SP_LAYER_BY_EPSG = {31982: "epsg31982", 31983: "epsg31983"}
 
 
+class AssignedEpsgIndex:
+    """Map tile ids (NOMENC_*) -> EPSG 31982/31983 from the articulacao GPKG."""
+
+    def __init__(self, path: Path, layer: str = DEFAULT_ARTIC_LAYER):
+        import geopandas as gpd
+
+        self.path = path
+        self.layer = layer
+        self._by_id: dict[str, int] = {}
+        if not path.is_file():
+            raise FileNotFoundError(f"Articulacao para EPSG atribuido nao encontrada: {path}")
+        log(f"Lendo EPSG por tile na articulacao: {path} | layer={layer}")
+        artic = gpd.read_file(path, layer=layer)
+        if "epsg" not in artic.columns:
+            raise ValueError(
+                f"A articulacao {path} nao tem a coluna 'epsg' (31982/31983 por tile)."
+            )
+        for _, row in artic.iterrows():
+            try:
+                epsg = int(float(str(row.get("epsg")).strip()))
+            except (TypeError, ValueError):
+                continue
+            if epsg not in (31982, 31983):
+                continue
+            for col in _AUTO_ID_COLUMNS:
+                value = row.get(col)
+                if value is None or (isinstance(value, float) and value != value):
+                    continue
+                text = str(value).strip()
+                if text:
+                    self._by_id.setdefault(text.casefold(), epsg)
+        log(f"  EPSG atribuido indexado para {len(self._by_id)} id(s) de tile.")
+
+    def lookup_filename(self, filename: str) -> int | None:
+        for candidate in tile_id_candidates_from_saida(filename, tile_key_from_filename(filename)):
+            hit = self._by_id.get(candidate.casefold())
+            if hit is not None:
+                return hit
+        return None
+
+
 class SpBounds:
     """Sao Paulo polygons, one layer per TIFF CRS, used without reprojection.
 
@@ -724,36 +805,81 @@ def _bounds_overlap(raster_bounds: tuple[float, float, float, float], envelope: 
     return not (right < env_left or left > env_right or top < env_bottom or bottom > env_top)
 
 
-def _classify_against_sp(path: str, mask: SpBounds) -> tuple[str, str, str]:
-    """Return (dentro|fora_de_sp|sem_localizacao, crs, detalhe). Header only."""
+def _classify_against_sp(
+    path: str,
+    mask: SpBounds,
+    assigned_index: AssignedEpsgIndex | None = None,
+) -> tuple[str, str, str, str]:
+    """Return (status, crs, detalhe, epsg_atribuido). Header only."""
     from shapely.geometry import box
+    from shapely.ops import transform as shp_transform
 
+    assigned = ""
     try:
         with rasterio.open(path) as src:
             if src.crs is None:
-                return "sem_localizacao", "", "CRS ausente; nao da para saber se cai em Sao Paulo."
+                return "sem_localizacao", "", "CRS ausente; nao da para saber se cai em Sao Paulo.", ""
             epsg = src.crs.to_epsg()
             crs_text = f"EPSG:{epsg}" if epsg else src.crs.to_string()
-            bounds = (float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top))
+            bounds = (
+                float(src.bounds.left),
+                float(src.bounds.bottom),
+                float(src.bounds.right),
+                float(src.bounds.top),
+            )
+            src_crs = src.crs
     except Exception as exc:  # noqa: BLE001
-        return "sem_localizacao", "", f"Nao abri o cabecalho: {type(exc).__name__}: {exc}"
-    packed = mask.for_epsg(epsg)
+        return "sem_localizacao", "", f"Nao abri o cabecalho: {type(exc).__name__}: {exc}", ""
+
+    packed = mask.for_epsg(epsg) if epsg else None
+    test_bounds = bounds
+    if packed is None and assigned_index is not None:
+        mapped = assigned_index.lookup_filename(Path(path).name)
+        if mapped is not None:
+            assigned = str(mapped)
+            try:
+                from pyproj import Transformer
+
+                transformer = Transformer.from_crs(src_crs, f"EPSG:{mapped}", always_xy=True)
+                geom = shp_transform(transformer.transform, box(*bounds))
+                test_bounds = (float(geom.bounds[0]), float(geom.bounds[1]), float(geom.bounds[2]), float(geom.bounds[3]))
+            except Exception:
+                # UTM WGS84 vs SIRGAS are nearly identical; keep native bounds as fallback.
+                test_bounds = bounds
+            packed = mask.for_epsg(mapped)
+            crs_text = f"{crs_text}->EPSG:{mapped}"
     if packed is None:
         return (
             "sem_localizacao",
             crs_text,
             f"CRS {crs_text} nao tem camada correspondente. "
-            "O cruzamento usa epsg31982 ou epsg31983, sem converter o limite.",
+            "O cruzamento usa epsg31982 ou epsg31983 (ou articulacao.epsg).",
+            "",
         )
     prepared, envelope = packed
-    if not _bounds_overlap(bounds, envelope):
-        return "fora_de_sp", crs_text, f"Retangulo fora do envelope de Sao Paulo ({crs_text})."
-    if prepared.intersects(box(*bounds)):
-        return "dentro", crs_text, ""
-    return "fora_de_sp", crs_text, f"Nao intersecta o limite de Sao Paulo ({crs_text})."
+    detail_assign = (
+        f" EPSG {assigned} atribuido pela articulacao (sufixo {PROJETION_ASSIGNED_SUFFIX})."
+        if assigned
+        else ""
+    )
+    if not _bounds_overlap(test_bounds, envelope):
+        return (
+            "fora_de_sp",
+            crs_text,
+            f"Retangulo fora do envelope de Sao Paulo ({crs_text}).{detail_assign}",
+            assigned,
+        )
+    if prepared.intersects(box(*test_bounds)):
+        return "dentro", crs_text, detail_assign.strip(), assigned
+    return (
+        "fora_de_sp",
+        crs_text,
+        f"Nao intersecta o limite de Sao Paulo ({crs_text}).{detail_assign}",
+        assigned,
+    )
 
 
-_SP_VISTORIA_COLUMNS = ["caminho", "lado", "tamanho", "status", "crs", "detalhe"]
+_SP_VISTORIA_COLUMNS = ["caminho", "lado", "tamanho", "status", "crs", "detalhe", "epsg_atribuido"]
 _SP_VISTORIA_STATUS = {"dentro", "fora_de_sp", "sem_localizacao"}
 
 
@@ -765,10 +891,12 @@ def _store_sp_vistoria(
     status: str,
     crs_text: str,
     detalhe: str,
+    epsg_atribuido: str = "",
 ) -> None:
     key = path.casefold()
     current = cache.get(key)
-    if current and current.get("status") in {"fora_de_sp", "sem_localizacao"} and status == "dentro":
+    # Never downgrade a previous "inside SP" result on a weaker recheck.
+    if current and current.get("status") == "dentro" and status in {"fora_de_sp", "sem_localizacao"}:
         return
     cache[key] = {
         "caminho": path,
@@ -777,6 +905,7 @@ def _store_sp_vistoria(
         "status": status,
         "crs": crs_text,
         "detalhe": detalhe,
+        "epsg_atribuido": epsg_atribuido or (current or {}).get("epsg_atribuido") or "",
     }
 
 
@@ -799,6 +928,7 @@ def load_sp_vistoria(path: Path) -> dict[str, dict[str, str]]:
                         status,
                         (row.get("crs") or "").strip(),
                         (row.get("detalhe") or "").strip(),
+                        (row.get("epsg_atribuido") or "").strip(),
                     )
             return cache
     except OSError as exc:
@@ -862,7 +992,13 @@ def vistoria_from_registry(out_dir: Path) -> dict[str, dict[str, str]]:
     return cache
 
 
-def _saved_sp_result(cache: dict[str, dict[str, str]], hit: RasterHit, force: bool) -> dict[str, str] | None:
+def _saved_sp_result(
+    cache: dict[str, dict[str, str]],
+    hit: RasterHit,
+    force: bool,
+    *,
+    can_assign_epsg: bool = False,
+) -> dict[str, str] | None:
     if force:
         return None
     saved = cache.get(hit.path.casefold())
@@ -871,13 +1007,26 @@ def _saved_sp_result(cache: dict[str, dict[str, str]], hit: RasterHit, force: bo
     tamanho = saved.get("tamanho") or ""
     if tamanho and tamanho != str(hit.size):
         return None
+    # Old cache: CRS like 32723 was "sem_localizacao". Recheck with articulacao.epsg.
+    if (
+        can_assign_epsg
+        and saved.get("status") == "sem_localizacao"
+        and "nao tem camada correspondente" in (saved.get("detalhe") or "").casefold()
+    ):
+        return None
     return saved
 
 
-def sp_vistoria_has_new_files(hits: list[RasterHit], cache: dict[str, dict[str, str]], force: bool) -> bool:
+def sp_vistoria_has_new_files(
+    hits: list[RasterHit],
+    cache: dict[str, dict[str, str]],
+    force: bool,
+    *,
+    can_assign_epsg: bool = False,
+) -> bool:
     if force:
         return True
-    return any(_saved_sp_result(cache, hit, False) is None for hit in hits)
+    return any(_saved_sp_result(cache, hit, False, can_assign_epsg=can_assign_epsg) is None for hit in hits)
 
 
 def filter_rasters_to_sp(
@@ -888,6 +1037,7 @@ def filter_rasters_to_sp(
     label: str,
     rgb: bool,
     force: bool,
+    assigned_index: AssignedEpsgIndex | None = None,
 ) -> tuple[list[RasterHit], list[dict[str, str]]]:
     """Drop rasters whose header bounds do not intersect Sao Paulo.
 
@@ -897,7 +1047,11 @@ def filter_rasters_to_sp(
     if not hits:
         return [], []
     lado = "rgb" if rgb else "ir"
-    pending = [hit for hit in hits if _saved_sp_result(cache, hit, force) is None]
+    pending = [
+        hit
+        for hit in hits
+        if _saved_sp_result(cache, hit, force, can_assign_epsg=assigned_index is not None) is None
+    ]
     reused = len(hits) - len(pending)
     if pending:
         if mask is None:
@@ -910,8 +1064,12 @@ def filter_rasters_to_sp(
         # One TIFF at a time. Opening GeoTIFFs from several threads crashes GDAL on
         # Windows with 0xC0000005 (exit code -1073741819).
         for done, hit in enumerate(pending, 1):
-            status, crs_text, detail = _classify_against_sp(hit.path, mask)
-            _store_sp_vistoria(cache, hit.path, lado, str(hit.size), status, crs_text, detail)
+            status, crs_text, detail, epsg_atribuido = _classify_against_sp(
+                hit.path, mask, assigned_index=assigned_index
+            )
+            _store_sp_vistoria(
+                cache, hit.path, lado, str(hit.size), status, crs_text, detail, epsg_atribuido
+            )
             if done % 500 == 0 or done == len(pending):
                 log(
                     f"  ... {done}/{len(pending)} {label} conferidos "
@@ -2196,9 +2354,16 @@ def tipo_juncao_for_row(row: dict[str, str], *, alinhamento: str | None = None) 
     if status == "interrompido":
         return "interrompido"
     if tipo == "par" or row.get("cenario") in {"1", "2", "3", "4"}:
-        align = alinhamento or infer_alinhamento_from_saida(
-            row.get("saida_nome") or "", row.get("detalhe") or ""
+        saida = row.get("saida_nome") or ""
+        align = alinhamento or infer_alinhamento_from_saida(saida, row.get("detalhe") or "")
+        needs_proj = PROJETION_ASSIGNED_SUFFIX.casefold() in saida.casefold() or bool(
+            str(row.get("_projetion_assigned") or "").strip() in {"1", "true", "True"}
+            or row.get("epsg_atribuido")
         )
+        if needs_proj and align == _TIPO_JUNCAO_RESAMPLED:
+            return "resampled_projetion_assigned"
+        if needs_proj:
+            return "projetion_assigned"
         if align == _TIPO_JUNCAO_RESAMPLED:
             return _TIPO_JUNCAO_RESAMPLED
         if align == _TIPO_JUNCAO_DIRETOS:
@@ -2324,11 +2489,12 @@ def prioritize_queue_direto_then_resampled(
     direto: list[dict[str, str]] = []
     resampled: list[dict[str, str]] = []
     desconhecido: list[dict[str, str]] = []
+    projetion: list[dict[str, str]] = []
     reused = 0
     probed = 0
     started = time.time()
     log(
-        "Ordenando a fila (direto primeiro, resampled depois). "
+        "Ordenando a fila: direto -> resampled -> projetion_assigned. "
         "Vistoria de grade so para pares novos/ausentes no cache."
     )
     for index, row in enumerate(queue, 1):
@@ -2342,13 +2508,19 @@ def prioritize_queue_direto_then_resampled(
             probed += 1
             if align in _GRADE_OK:
                 store_grade_result(cache, row, align)
-        row["_fila_alinhamento"] = align
-        if align == _TIPO_JUNCAO_DIRETOS:
-            direto.append(row)
-        elif align == _TIPO_JUNCAO_RESAMPLED:
-            resampled.append(row)
+        needs_proj = bool(str(row.get("_projetion_assigned") or "").strip() in {"1", "true", "True"} or row.get("epsg_atribuido"))
+        if needs_proj:
+            tag = f"{align}+projetion_assigned" if align in _GRADE_OK else "projetion_assigned"
+            row["_fila_alinhamento"] = tag
+            projetion.append(row)
         else:
-            desconhecido.append(row)
+            row["_fila_alinhamento"] = align
+            if align == _TIPO_JUNCAO_DIRETOS:
+                direto.append(row)
+            elif align == _TIPO_JUNCAO_RESAMPLED:
+                resampled.append(row)
+            else:
+                desconhecido.append(row)
         if probed and (probed % 500 == 0):
             log(
                 f"  ... novas vistorias de grade: {probed} "
@@ -2358,16 +2530,40 @@ def prioritize_queue_direto_then_resampled(
         save_grade_vistoria(cache_path, cache)
     elif reused:
         log(f"Vistoria de grade: reaproveitei {reused} par(es) de {cache_path} (0 novas leituras de cabecalho).")
-    ordered = direto + desconhecido + resampled
+    ordered = direto + desconhecido + resampled + projetion
     log("=" * 78)
     log("ORDEM DA FILA NESTA EXECUCAO")
-    log(f"  1) Copia direta (mesma grade RGB/IR):     {len(direto)}")
-    log(f"  2) Grade ainda nao classificada:          {len(desconhecido)}")
-    log(f"  3) Precisa resampled (grades diferentes): {len(resampled)}")
+    log(f"  1) Copia direta (mesma grade, CRS ok):           {len(direto)}")
+    log(f"  2) Grade ainda nao classificada:                {len(desconhecido)}")
+    log(f"  3) Precisa resampled (grades diferentes):       {len(resampled)}")
+    log(f"  4) Precisa {PROJETION_ASSIGNED_SUFFIX} (por ultimo): {len(projetion)}")
     log(f"  Cache: reaproveitadas={reused} | novas vistorias={probed}")
     log("  Os ja gravados em disco continuam pulados; so estes da fila serao escritos.")
     log("=" * 78)
     return ordered
+
+
+def annotate_projetion_assigned(rows: list[dict[str, str]], sp_cache: dict[str, dict[str, str]]) -> int:
+    """Mark pairs whose RGB/IR needed articulacao.epsg to enter Sao Paulo."""
+    marked = 0
+    for row in rows:
+        if row.get("tipo_registro") != "par":
+            continue
+        assigned = ""
+        for key in (row.get("rgb_caminho") or "", row.get("ir_caminho") or ""):
+            if not key:
+                continue
+            saved = sp_cache.get(key.casefold()) or {}
+            value = (saved.get("epsg_atribuido") or "").strip()
+            if value:
+                assigned = value
+                break
+        if not assigned:
+            continue
+        row["_projetion_assigned"] = "1"
+        row["epsg_atribuido"] = assigned
+        marked += 1
+    return marked
 
 
 @dataclass
@@ -2575,6 +2771,13 @@ def fuse_one(job: dict) -> dict:
     nir_band = int(job["nir_band"])
     gdal_threads = str(job["gdal_threads"])
     cache_mb = int(job["cache_mb"])
+    assigned_epsg_raw = str(job.get("assigned_epsg") or "").strip()
+    assigned_epsg: int | None = None
+    if assigned_epsg_raw:
+        try:
+            assigned_epsg = int(assigned_epsg_raw)
+        except ValueError:
+            assigned_epsg = None
     started = time.time()
     tmp_path = out_path.with_name(out_path.stem + TMP_SUFFIX)
 
@@ -2655,23 +2858,39 @@ def fuse_one(job: dict) -> dict:
                     f"{prefix} AVISO: nem o RGB nem o IR declaram NoData. "
                     "Area sem cobertura de IR fica 0."
                 )
+            needs_proj = assigned_epsg in (31982, 31983)
+            plain_out = apply_output_suffixes(out_path.name, resampled=False, projetion_assigned=False)
             if same_grid:
                 log(f"{prefix} Grade do IR ja coincide com o RGB. NIR copiado sem reamostrar.")
-                log(f"{prefix} Grade igual. O arquivo final sera {out_path.name}.")
                 alignment_note = "Grade do IR ja coincidia com o RGB; NIR copiado sem reamostrar."
             else:
-                out_path = out_path.with_name(resampled_output_name(out_path.name))
-                tmp_path = out_path.with_name(out_path.stem + TMP_SUFFIX)
-                _remove_quiet(tmp_path)
                 log(
                     f"{prefix} Alinhando IR na grade do RGB com nearest neighbor "
                     f"(rasterio.warp.reproject)."
                 )
-                log(f"{prefix} Grade diferente. O arquivo final sera {out_path.name}.")
                 alignment_note = (
                     "IR alinhado na grade do RGB com nearest neighbor. "
                     f"RGB={tuple(rgb_src.transform)[:6]} IR={tuple(ir_src.transform)[:6]}"
                 )
+            out_path = out_path.with_name(
+                apply_output_suffixes(
+                    plain_out,
+                    resampled=not same_grid,
+                    projetion_assigned=needs_proj,
+                )
+            )
+            tmp_path = out_path.with_name(out_path.stem + TMP_SUFFIX)
+            _remove_quiet(tmp_path)
+            if needs_proj:
+                log(
+                    f"{prefix} CRS de saida sera EPSG:{assigned_epsg} "
+                    f"(atribuido pela articulacao; era RGB={rgb_src.crs})."
+                )
+                alignment_note = (
+                    f"{alignment_note} CRS atribuido EPSG:{assigned_epsg} "
+                    f"via articulacao{PROJETION_ASSIGNED_SUFFIX}."
+                ).strip()
+            log(f"{prefix} Arquivo final sera {out_path.name}.")
 
             log(
                 f"{prefix} Referencia RGB: {rgb_src.width}x{rgb_src.height} px | "
@@ -2688,10 +2907,16 @@ def fuse_one(job: dict) -> dict:
             block = max(16, block - (block % 16)) if block >= 16 else 16
             width_px = str(rgb_src.width)
             height_px = str(rgb_src.height)
-            crs_text = str(rgb_src.crs or "")
+            if needs_proj:
+                out_crs = rasterio.crs.CRS.from_epsg(assigned_epsg)
+                crs_text = f"EPSG:{assigned_epsg}"
+            else:
+                out_crs = rgb_src.crs
+                crs_text = str(rgb_src.crs or "")
             profile.update(
                 count=4,
                 driver="GTiff",
+                crs=out_crs,
                 tiled=not tiny,
                 BIGTIFF="IF_SAFER",
                 NUM_THREADS=gdal_threads,
@@ -3243,6 +3468,7 @@ def _run_queue(
                 "ir_path": row["ir_caminho"],
                 "out_path": row["saida_caminho"],
                 "log_prefix": prefix,
+                "assigned_epsg": row.get("epsg_atribuido") or "",
             }
             try:
                 result = fuse_one(job)
@@ -3281,6 +3507,7 @@ def _run_queue(
                     "ir_path": row["ir_caminho"],
                     "out_path": row["saida_caminho"],
                     "log_prefix": prefix,
+                    "assigned_epsg": row.get("epsg_atribuido") or "",
                 },
             )
         )
@@ -3452,8 +3679,19 @@ def main(argv: list[str] | None = None) -> int:
             log(f"ABORTADO: nenhum .tif/.tiff em {ir_dir}")
             return 2
 
-        need_sp = sp_vistoria_has_new_files(rgb_all, sp_cache, force_sp) or sp_vistoria_has_new_files(
-            ir_all, sp_cache, force_sp
+        assigned_index: AssignedEpsgIndex | None = None
+        try:
+            assigned_index = AssignedEpsgIndex(Path(args.articulacao), args.articulacao_layer)
+        except Exception as exc:  # noqa: BLE001
+            log(
+                f"AVISO: nao carreguei EPSG por tile da articulacao ({args.articulacao}): "
+                f"{type(exc).__name__}: {exc}. Tiles com CRS fora de 31982/31983 continuam sem_localizacao."
+            )
+
+        need_sp = sp_vistoria_has_new_files(
+            rgb_all, sp_cache, force_sp, can_assign_epsg=assigned_index is not None
+        ) or sp_vistoria_has_new_files(
+            ir_all, sp_cache, force_sp, can_assign_epsg=assigned_index is not None
         )
         sp_mask = None
         if need_sp:
@@ -3472,10 +3710,22 @@ def main(argv: list[str] | None = None) -> int:
             log("Nenhum TIFF novo ou com tamanho diferente. A vistoria de SP nao sera refeita.")
 
         rgb_hits, rgb_outside = filter_rasters_to_sp(
-            rgb_all, sp_mask, sp_cache, label="RGB", rgb=True, force=force_sp
+            rgb_all,
+            sp_mask,
+            sp_cache,
+            label="RGB",
+            rgb=True,
+            force=force_sp,
+            assigned_index=assigned_index,
         )
         ir_hits, ir_outside = filter_rasters_to_sp(
-            ir_all, sp_mask, sp_cache, label="IR", rgb=False, force=force_sp
+            ir_all,
+            sp_mask,
+            sp_cache,
+            label="IR",
+            rgb=False,
+            force=force_sp,
+            assigned_index=assigned_index,
         )
         save_sp_vistoria(vistoria_path, sp_cache, rgb_all + ir_all)
         if not rgb_hits or not ir_hits:
@@ -3504,6 +3754,12 @@ def main(argv: list[str] | None = None) -> int:
             if row["saida_nome"]:
                 row["saida_caminho"] = str(out_dir / row["saida_nome"])
             row["run_id_desta_execucao"] = run_id
+        n_proj = annotate_projetion_assigned(pairing.pairs, sp_cache)
+        if n_proj:
+            log(
+                f"Pares que precisarao de {PROJETION_ASSIGNED_SUFFIX}: {n_proj} "
+                "(CRS atribuido via articulacao.epsg; processados depois dos resampled)."
+            )
 
         skipped, queue = _assign_resume_status(
             pairing.pairs,
@@ -3619,21 +3875,30 @@ def main(argv: list[str] | None = None) -> int:
         lock.release()
 
 
-def _mostrar_area_de_trabalho():
-    """Simula o atalho Win+D para mostrar a area de trabalho."""
+def _disable_windows_console_quick_edit() -> None:
+    """Stop CMD Quick Edit from freezing stdout until the window is clicked/resized."""
     if not sys.platform.startswith("win"):
         return
-    VK_LWIN = 0x5B
-    VK_D = 0x44
-    KEYEVENTF_KEYUP = 0x0002
-    user32 = ctypes.windll.user32
-    user32.keybd_event(VK_LWIN, 0, 0, 0)
-    user32.keybd_event(VK_D, 0, 0, 0)
-    user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
-    user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(ctypes.c_ulong(-10 & 0xFFFFFFFF))  # STD_INPUT_HANDLE
+        mode = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        ENABLE_QUICK_EDIT = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        new_mode = (mode.value | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT
+        kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    _mostrar_area_de_trabalho()
+    _disable_windows_console_quick_edit()
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
     with _KeepAwake():
         sys.exit(main())
