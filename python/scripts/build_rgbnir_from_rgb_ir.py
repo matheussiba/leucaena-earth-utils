@@ -136,7 +136,7 @@ COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 
 # Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
 _ID_COLUMN_BY_LAYER = {
@@ -1038,14 +1038,14 @@ def filter_rasters_to_sp(
     rgb: bool,
     force: bool,
     assigned_index: AssignedEpsgIndex | None = None,
-) -> tuple[list[RasterHit], list[dict[str, str]]]:
-    """Drop rasters whose header bounds do not intersect Sao Paulo.
+) -> tuple[list[RasterHit], list[RasterHit], list[dict[str, str]]]:
+    """Split rasters into inside-SP, outside-SP (still fusible later), and other drops.
 
     Results already stored in ``cache`` are reused. Only a new file, a file
     whose size changed, or ``force=True`` opens the TIFF header.
     """
     if not hits:
-        return [], []
+        return [], [], []
     lado = "rgb" if rgb else "ir"
     pending = [
         hit
@@ -1079,6 +1079,7 @@ def filter_rasters_to_sp(
         log(f"{label}: {reused} arquivo(s) reaproveitados da vistoria de SP. Nenhum cabecalho foi aberto.")
 
     kept: list[RasterHit] = []
+    fora: list[RasterHit] = []
     dropped: list[dict[str, str]] = []
     outside = 0
     unknown = 0
@@ -1090,20 +1091,26 @@ def filter_rasters_to_sp(
             continue
         if status == "fora_de_sp":
             outside += 1
-            kind = "fora_de_sp"
-        else:
-            unknown += 1
-            kind = "sem_localizacao"
+            fora.append(hit)
+            continue
+        unknown += 1
         row = _row_for_leftover(
-            hit, kind=kind, status=status, detail=saved.get("detalhe") or "", rgb=rgb, cenario="", tipo=""
+            hit,
+            kind="sem_localizacao",
+            status=status,
+            detail=saved.get("detalhe") or "",
+            rgb=rgb,
+            cenario="",
+            tipo="",
         )
         row["crs"] = saved.get("crs") or ""
         dropped.append(row)
     log(
-        f"  {label}: {len(kept)} dentro de SP, {outside} fora (ignorados), "
+        f"  {label}: {len(kept)} dentro de SP, {outside} fora "
+        f"(serao fundidos depois que SP acabar), "
         f"{unknown} sem localizacao (ignorados)."
     )
-    return kept, dropped
+    return kept, fora, dropped
 
 
 def _index_by_filename(
@@ -2335,6 +2342,8 @@ def tipo_juncao_for_row(row: dict[str, str], *, alinhamento: str | None = None) 
     """Single cobertura label covering pairing outcome + alignment + errors."""
     status = (row.get("status") or "").strip()
     tipo = (row.get("tipo_registro") or "").strip()
+    if str(row.get("_fora_de_sp") or "").strip() in {"1", "true", "True"}:
+        return "fora_de_sp"
     if status == "fora_de_sp" or tipo == "fora_de_sp":
         return "fora_de_sp"
     if status == "sem_localizacao" or tipo == "sem_localizacao":
@@ -2494,9 +2503,13 @@ def prioritize_queue_direto_then_resampled(
     probed = 0
     started = time.time()
     log(
-        "Ordenando a fila: direto -> resampled -> projetion_assigned. "
-        "Vistoria de grade so para pares novos/ausentes no cache."
+        "Ordenando a fila: SP (direto -> resampled -> projetion_assigned) "
+        "e so depois fora_de_sp. Vistoria de grade so para pares novos/ausentes no cache."
     )
+    fora_direto: list[dict[str, str]] = []
+    fora_resampled: list[dict[str, str]] = []
+    fora_desconhecido: list[dict[str, str]] = []
+    fora_projetion: list[dict[str, str]] = []
     for index, row in enumerate(queue, 1):
         key = grade_cache_key(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
         entry = cache.get(key)
@@ -2508,19 +2521,35 @@ def prioritize_queue_direto_then_resampled(
             probed += 1
             if align in _GRADE_OK:
                 store_grade_result(cache, row, align)
-        needs_proj = bool(str(row.get("_projetion_assigned") or "").strip() in {"1", "true", "True"} or row.get("epsg_atribuido"))
+        needs_proj = bool(
+            str(row.get("_projetion_assigned") or "").strip() in {"1", "true", "True"}
+            or row.get("epsg_atribuido")
+        )
+        is_fora = str(row.get("_fora_de_sp") or "").strip() in {"1", "true", "True"}
         if needs_proj:
             tag = f"{align}+projetion_assigned" if align in _GRADE_OK else "projetion_assigned"
-            row["_fila_alinhamento"] = tag
-            projetion.append(row)
         else:
-            row["_fila_alinhamento"] = align
-            if align == _TIPO_JUNCAO_DIRETOS:
-                direto.append(row)
+            tag = align
+        if is_fora:
+            tag = f"fora_de_sp+{tag}" if tag else "fora_de_sp"
+        row["_fila_alinhamento"] = tag
+        if is_fora:
+            if needs_proj:
+                fora_projetion.append(row)
+            elif align == _TIPO_JUNCAO_DIRETOS:
+                fora_direto.append(row)
             elif align == _TIPO_JUNCAO_RESAMPLED:
-                resampled.append(row)
+                fora_resampled.append(row)
             else:
-                desconhecido.append(row)
+                fora_desconhecido.append(row)
+        elif needs_proj:
+            projetion.append(row)
+        elif align == _TIPO_JUNCAO_DIRETOS:
+            direto.append(row)
+        elif align == _TIPO_JUNCAO_RESAMPLED:
+            resampled.append(row)
+        else:
+            desconhecido.append(row)
         if probed and (probed % 500 == 0):
             log(
                 f"  ... novas vistorias de grade: {probed} "
@@ -2530,13 +2559,24 @@ def prioritize_queue_direto_then_resampled(
         save_grade_vistoria(cache_path, cache)
     elif reused:
         log(f"Vistoria de grade: reaproveitei {reused} par(es) de {cache_path} (0 novas leituras de cabecalho).")
-    ordered = direto + desconhecido + resampled + projetion
+    ordered = (
+        direto
+        + desconhecido
+        + resampled
+        + projetion
+        + fora_direto
+        + fora_desconhecido
+        + fora_resampled
+        + fora_projetion
+    )
+    n_fora = len(fora_direto) + len(fora_desconhecido) + len(fora_resampled) + len(fora_projetion)
     log("=" * 78)
     log("ORDEM DA FILA NESTA EXECUCAO")
-    log(f"  1) Copia direta (mesma grade, CRS ok):           {len(direto)}")
-    log(f"  2) Grade ainda nao classificada:                {len(desconhecido)}")
-    log(f"  3) Precisa resampled (grades diferentes):       {len(resampled)}")
-    log(f"  4) Precisa {PROJETION_ASSIGNED_SUFFIX} (por ultimo): {len(projetion)}")
+    log(f"  1) SP copia direta:                              {len(direto)}")
+    log(f"  2) SP grade nao classificada:                    {len(desconhecido)}")
+    log(f"  3) SP resampled:                                 {len(resampled)}")
+    log(f"  4) SP {PROJETION_ASSIGNED_SUFFIX}:               {len(projetion)}")
+    log(f"  5) Fora de SP (so depois que SP da fila acabar): {n_fora}")
     log(f"  Cache: reaproveitadas={reused} | novas vistorias={probed}")
     log("  Os ja gravados em disco continuam pulados; so estes da fila serao escritos.")
     log("=" * 78)
@@ -3298,7 +3338,7 @@ def _print_scenario_audit(
     log(f"    RGB sem IR:                        {rgb_sem}")
     log(f"    IR sem RGB:                        {ir_sem}")
     log(f"    anomalias:                         {anomalias}")
-    log(f"    fora de Sao Paulo:                 {fora}")
+    log(f"    fora de Sao Paulo (fila depois):   {fora}")
     log(f"    sem localizacao (sem CRS/bounds):  {sem_loc}")
     log(f"    conflitos de nome de saida:        {conflitos}")
     log(f"    duplicatas ignoradas:              {duplicatas}")
@@ -3359,7 +3399,7 @@ def _print_leftovers(rows: list[dict[str, str]]) -> None:
         "anomalia": "Anomalias (cenario 5)",
         "duplicata_ignorada": "Duplicatas ignoradas",
         "conflito_saida": "Conflitos de nome de saida",
-        "fora_de_sp": "Fora de Sao Paulo (ignorados)",
+        "fora_de_sp": "Fora de Sao Paulo (nao pareados; pares fora entram depois de SP)",
         "sem_localizacao": "Sem CRS ou retangulo (ignorados)",
     }
     for kind, title in groups.items():
@@ -3709,7 +3749,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             log("Nenhum TIFF novo ou com tamanho diferente. A vistoria de SP nao sera refeita.")
 
-        rgb_hits, rgb_outside = filter_rasters_to_sp(
+        rgb_hits, rgb_fora, rgb_outside = filter_rasters_to_sp(
             rgb_all,
             sp_mask,
             sp_cache,
@@ -3718,7 +3758,7 @@ def main(argv: list[str] | None = None) -> int:
             force=force_sp,
             assigned_index=assigned_index,
         )
-        ir_hits, ir_outside = filter_rasters_to_sp(
+        ir_hits, ir_fora, ir_outside = filter_rasters_to_sp(
             ir_all,
             sp_mask,
             sp_cache,
@@ -3728,33 +3768,47 @@ def main(argv: list[str] | None = None) -> int:
             assigned_index=assigned_index,
         )
         save_sp_vistoria(vistoria_path, sp_cache, rgb_all + ir_all)
-        if not rgb_hits or not ir_hits:
+        if (not rgb_hits and not rgb_fora) or (not ir_hits and not ir_fora):
             dropped = rgb_outside + ir_outside
             for row in dropped:
                 row["run_id_desta_execucao"] = run_id
                 row["notas"] = compose_note(row, out_dir)
             publish(dropped, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
-            if not rgb_hits:
-                log(f"ABORTADO: nenhum RGB intersecta Sao Paulo ({sp_path}).")
-            else:
-                log(f"ABORTADO: nenhum IR intersecta Sao Paulo ({sp_path}).")
+            log("ABORTADO: nenhum RGB/IR utilizavel (dentro ou fora de SP) para parear.")
             log(f"Os ignorados foram listados em {out_dir / REGISTRY_NAME}.")
             return 2
 
         log("Pareando RGB com IR pelo nome do arquivo...")
-        pairing = pair_rasters(rgb_hits, ir_hits)
+        pairing_sp = pair_rasters(rgb_hits, ir_hits) if rgb_hits and ir_hits else Pairing()
+        pairing_fora = pair_rasters(rgb_fora, ir_fora) if rgb_fora and ir_fora else Pairing()
+        for row in pairing_fora.pairs:
+            row["_fora_de_sp"] = "1"
+            note = (row.get("detalhe") or "").strip()
+            extra = "Fora de Sao Paulo: processado so depois que os pares dentro de SP acabarem."
+            row["detalhe"] = f"{note} {extra}".strip() if note else extra
+        if pairing_fora.pairs:
+            log(
+                f"Pares fora de SP: {len(pairing_fora.pairs)} "
+                "(entram na fila so depois de todos os pares dentro de SP desta execucao)."
+            )
+        pairing_pairs = pairing_sp.pairs + pairing_fora.pairs
         previous = load_previous_registry(out_dir / REGISTRY_NAME)
         if previous:
             log(f"Registro anterior carregado ({len(previous)} saidas) para preservar data e duracao.")
         else:
             log("Nao havia registro anterior. Este CSV comeca do zero.")
 
-        all_rows = pairing.all_rows() + rgb_outside + ir_outside
+        all_rows = (
+            pairing_sp.all_rows()
+            + pairing_fora.all_rows()
+            + rgb_outside
+            + ir_outside
+        )
         for row in all_rows:
             if row["saida_nome"]:
                 row["saida_caminho"] = str(out_dir / row["saida_nome"])
             row["run_id_desta_execucao"] = run_id
-        n_proj = annotate_projetion_assigned(pairing.pairs, sp_cache)
+        n_proj = annotate_projetion_assigned(pairing_pairs, sp_cache)
         if n_proj:
             log(
                 f"Pares que precisarao de {PROJETION_ASSIGNED_SUFFIX}: {n_proj} "
@@ -3762,7 +3816,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         skipped, queue = _assign_resume_status(
-            pairing.pairs,
+            pairing_pairs,
             out_dir=out_dir,
             previous=previous,
             overwrite=args.overwrite,
@@ -3774,7 +3828,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Resume-safe: never rewrite finished GeoTIFFs; only fill missing GPKG rows/attrs once.
         if cobertura is not None:
-            cobertura.sync_missing_from_rows(skipped + [r for r in pairing.pairs if r.get("status") == "ok"], out_dir)
+            cobertura.sync_missing_from_rows(skipped + [r for r in pairing_pairs if r.get("status") == "ok"], out_dir)
 
         grade_path = out_dir / GRADE_VISTORIA_NAME
         grade_cache = load_grade_vistoria(grade_path)
@@ -3795,13 +3849,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             progress = build_run_progress(
                 out_dir=out_dir,
-                pairs=pairing.pairs,
+                pairs=pairing_pairs,
                 skipped=skipped,
                 queue=queue,
             )
 
         ready_now = len(skipped)
-        total_pairs = len(pairing.pairs)
+        total_pairs = len(pairing_pairs)
         pct_now = (100.0 * ready_now / total_pairs) if total_pairs else 100.0
         _print_scenario_audit(
             all_rows,
@@ -3814,12 +3868,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Andamento ja em disco: {ready_now}/{total_pairs} ({pct_now:.2f}%). "
             "ETA e disco serao recalculados a cada tile gravado."
         )
-        _print_pair_plan(pairing.pairs, queue, skipped)
+        _print_pair_plan(pairing_pairs, queue, skipped)
         _print_leftovers(all_rows)
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
         log("CSV inicial gravado, antes de comecar a fundir. Da para abrir o resumo enquanto roda (melhor copiar o arquivo).")
 
-        if not pairing.pairs:
+        if not pairing_pairs:
             log("Nenhum par RGB+IR. Nada foi fundido. Confira os nomes no CSV (rgb_sem_ir / ir_sem_rgb).")
             _print_final(all_rows, out_dir, started)
             return 2
@@ -3837,10 +3891,12 @@ def main(argv: list[str] | None = None) -> int:
         proximo = len(skipped) + 1
         n_dir = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_DIRETOS)
         n_res = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_RESAMPLED)
+        n_fora_q = sum(1 for row in queue if str(row.get("_fora_de_sp") or "").strip() in {"1", "true", "True"})
         log(
             f"Comecando a gravar {len(queue)} tile(s) "
-            f"(direto={n_dir}, resampled/outros={len(queue) - n_dir}; resampled na fila={n_res}). "
-            f"Contador: {proximo}/{len(pairing.pairs)} ({pct_now:.2f}% ja pronto) "
+            f"(direto={n_dir}, resampled/outros={len(queue) - n_dir}; resampled na fila={n_res}; "
+            f"fora_de_sp na fila={n_fora_q}). "
+            f"Contador: {proximo}/{len(pairing_pairs)} ({pct_now:.2f}% ja pronto) "
             f"({len(skipped)} ja estavam em disco e NAO serao refeitos)."
         )
         outcome = _run_queue(
@@ -3855,7 +3911,7 @@ def main(argv: list[str] | None = None) -> int:
             cache_mb=int(args.cache_mb),
             nir_band=int(args.nir_band),
             already_done=len(skipped),
-            grand_total=len(pairing.pairs),
+            grand_total=len(pairing_pairs),
             cobertura=cobertura,
             progress=progress,
             grade_cache=grade_cache,
