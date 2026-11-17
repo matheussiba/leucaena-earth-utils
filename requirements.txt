@@ -8,5 +8,5 @@ pyogrio>=0.7
 # Used by build_rgbnir_from_rgb_ir.py (RGB bands 1-3 + IR band 1 → 4-band RGBNIR)
 rasterio>=1.3
 
-# PyQGIS scripts (`pyqgis_*.py`) run inside QGIS' own Python and do not need
+# PyQGIS scripts in python/qgis/ run inside QGIS' own Python and do not need
 # anything from this file.

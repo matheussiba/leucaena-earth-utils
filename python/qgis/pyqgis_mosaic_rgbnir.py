@@ -26,9 +26,8 @@ import gc
 # 1. CONFIGURACOES
 # =============================================================================
 
-GPKG_PATH = (
-    r"G:\My Drive\PHD\02-Tese\04-Processamento"
-    r"\msb-phd-leucaena-sp.gpkg"
+GPKG_PATH = str(
+    Path(__file__).resolve().parents[2] / "data" / "msb-phd-leucaena-sp.gpkg"
 )
 
 LAYER_NAME = "articulacao_aoi_v2_centro_piracicaba"

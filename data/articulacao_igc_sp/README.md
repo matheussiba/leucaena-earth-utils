@@ -11,4 +11,5 @@ Extra fields: `layer` (source articulation), `NOMENC_10K`, `path`, `overlap`,
 `msb_use`. CRS: **SIRGAS 2000** (EPSG:4674).
 
 Used as the default `--articulacao` input for
-`python/scripts/transferir_laz_rgb_ir_v3_por_aoi.py`.
+`python/scripts/transferir_laz_rgb_ir_v3_por_aoi.py` and
+`r/scripts/geotrees/batch_geotrees_als.R`.

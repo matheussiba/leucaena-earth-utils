@@ -38,7 +38,7 @@ bootstraps every finished TIFF already in ``G:\\RGBNIR``; afterwards each
 new successful write appends one feature. Updates are always written to a
 temporary file and renamed into place so a crash does not leave a half-written
 GPKG. Articulation polygons come from
-``C:\\Users\\admin\\Documents\\Projetos_Matheus_Barros\\msb-phd-leucaena-sp.gpkg``.
+``data/msb-phd-leucaena-sp.gpkg`` in this repository.
 
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
@@ -60,7 +60,7 @@ band 4 is copied and the filename stays as above. When the grids differ, band
 filename gains ``-resampled`` before the extension (``<ID>-resampled.tif``).
 
 Only tiles that intersect Sao Paulo are fused. The state polygons come from
-``G:\\sp-bounds.gpkg``, already split into two layers: ``epsg31982`` and
+``data/sp-bounds.gpkg``, already split into two layers: ``epsg31982`` and
 ``epsg31983``. A TIFF is compared with the layer of the same EPSG. The script
 does not reproject that polygon. Each TIFF is tested by its header bounds,
 not by its pixels. That result is stored in ``rgbnir_sp_vistoria.csv`` and
@@ -101,10 +101,9 @@ except ImportError:  # checked again in main(); matching logic stays importable
 DEFAULT_RGB_DIR = r"E:\RGB"
 DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
-DEFAULT_SP_BOUNDS = r"G:\sp-bounds.gpkg"
-DEFAULT_ARTICULACAO = (
-    r"C:\Users\admin\Documents\Projetos_Matheus_Barros\msb-phd-leucaena-sp.gpkg"
-)
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+DEFAULT_SP_BOUNDS = str(_DATA_DIR / "sp-bounds.gpkg")
+DEFAULT_ARTICULACAO = str(_DATA_DIR / "msb-phd-leucaena-sp.gpkg")
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
 
 # False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
@@ -368,12 +367,14 @@ class RunLock:
         self.path = folder / LOCK_NAME
         self.run_id = run_id
         self._held = False
+        self.blocked_by_other = False
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             pid = _read_lock_pid(self.path)
             if pid and _pid_is_running(pid):
+                self.blocked_by_other = True
                 log(
                     f"ABORTADO: ja existe uma copia deste script rodando (PID {pid}). "
                     f"Trava: {self.path}"
@@ -595,7 +596,7 @@ def scan_rasters(folder: Path) -> list[RasterHit]:
     return found
 
 
-# Layer name in G:\sp-bounds.gpkg -> the EPSG the layer is already stored in.
+# Layer name in data/sp-bounds.gpkg -> the EPSG the layer is already stored in.
 # The script never reprojects these polygons.
 _SP_LAYER_BY_EPSG = {31982: "epsg31982", 31983: "epsg31983"}
 
@@ -2729,7 +2730,8 @@ def main(argv: list[str] | None = None) -> int:
 
     lock = RunLock(out_dir, run_id)
     if not lock.acquire():
-        return 2
+        # 3 = another live copy holds the lock. The .bat closes without pausing.
+        return 3 if lock.blocked_by_other else 2
 
     exit_code = 0
     try:

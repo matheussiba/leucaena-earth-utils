@@ -190,7 +190,7 @@ help_text <- function() {
     "  --bloco COD           Campo BLOCO da articulacao. Vazio = pasta inteira.",
     "                        Varios: EF,2024",
     "  --out-dir DIR         Registro + produtos (padrao G:/geotrees_als).",
-    "  --articulacao GPKG    Articulacao IGC. Padrao: o .gpkg na mesma pasta deste script.",
+    "  --articulacao GPKG    Articulacao IGC. Padrao: data/articulacao_igc_sp/ no clone.",
     "  --articulacao-layer   Nome da camada.",
     "  --n-cores N           Padrao: nucleos fisicos - 2.",
     "  --resolution M        Padrao 1 (igual ALS_processing.R).",
@@ -294,13 +294,11 @@ repo_root <- function(dir_script) {
 
 default_articulacao <- function(dir_script) {
   nome <- "articulacao-igc-merged-spatialindex-sirgas2000.gpkg"
-  ao_lado <- file.path(dir_script, nome)
-  if (file.exists(ao_lado)) return(normalizePath(ao_lado, winslash = "/"))
   bundled <- file.path(repo_root(dir_script), "data", "articulacao_igc_sp", nome)
   local <- file.path("D:/_articulacao_igc_sp", nome)
   if (file.exists(bundled)) return(normalizePath(bundled, winslash = "/"))
   if (file.exists(local)) return(normalizePath(local, winslash = "/"))
-  normalizePath(ao_lado, winslash = "/", mustWork = FALSE)
+  normalizePath(bundled, winslash = "/", mustWork = FALSE)
 }
 
 out_paths <- function(out_dir) {
@@ -1328,14 +1326,14 @@ main <- function() {
     if (length(blocos)) {
       stop(
         "Articulacao nao encontrada e BLOCO foi pedido:\n  ", opt$articulacao,
-        "\nColoque articulacao-igc-merged-spatialindex-sirgas2000.gpkg na mesma pasta do .bat, sem subpasta.",
+        "\nO arquivo fica em data/articulacao_igc_sp/ dentro do clone do repositorio.",
         call. = FALSE
       )
     }
     cat("AVISO: articulacao nao encontrada em:\n  ", opt$articulacao, "\n", sep = "")
     cat("BLOCO esta vazio, entao a pasta inteira entra na fila.\n")
     cat("Para dois blocos, no .bat: set \"BLOCO=EF,2024\"\n")
-    cat("O GPKG tem que estar na mesma pasta do .bat, sem subpasta:\n")
+    cat("O GPKG fica em data/articulacao_igc_sp/ dentro do clone:\n")
     cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
   } else {
     cat("Lendo articulacao (atributos): ", opt$articulacao, "\n", sep = "")

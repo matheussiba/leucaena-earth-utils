@@ -4,10 +4,7 @@
 
 ## Naming convention
 
-| Prefix | Meaning |
-|:-------|:--------|
-| `pyqgis_` | Run **inside QGIS** (*Python Console* or *Run Script*). Depends on `qgis.core` / `processing`. |
-| *(no prefix)* | Standalone **CLI** Python (`python script.py`). |
+Standalone **CLI** Python (`python script.py`). PyQGIS scripts live in [`python/qgis/`](../qgis/).
 
 ---
 
@@ -16,7 +13,7 @@
 | File | Purpose |
 |:-----|:--------|
 | `transferir_laz_rgb_ir_v3_por_aoi.py` | Copy IGC-SP LAZ/RGB/IR tiles by intersecting any AOI (shp/geojson/gpkg/kml/kmz) with the merged articulation in `data/articulacao_igc_sp/`. Optional coverage GeoPackage output. |
-| `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. IR is nearest-neighbor resampled onto the RGB grid. Tiles whose header bounds do not intersect the matching layer of `G:\sp-bounds.gpkg` (`epsg31982` or `epsg31983`, no reprojection) are skipped. That check is saved in `rgbnir_sp_vistoria.csv` and reused; set `FORCE_SP_VISTORIA = True` or pass `--force-sp` to run it again. Output keeps the original name when the grids match, and adds `-resampled` only when the IR grid has to be aligned. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
+| `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. IR is nearest-neighbor resampled onto the RGB grid. Tiles whose header bounds do not intersect the matching layer of `data/sp-bounds.gpkg` (`epsg31982` or `epsg31983`, no reprojection) are skipped. That check is saved in `rgbnir_sp_vistoria.csv` and reused; set `FORCE_SP_VISTORIA = True` or pass `--force-sp` to run it again. Output keeps the original name when the grids match, and adds `-resampled` only when the IR grid has to be aligned. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
 
 ```powershell
 pip install -r ../../requirements.txt
@@ -53,9 +50,9 @@ was also moved — only the PowerShell cell — to
 
 ---
 
-## PyQGIS scripts (`pyqgis_*`)
+## PyQGIS
 
-Run **inside QGIS**, not from the system shell.
+Those scripts were moved to `python/qgis/`. Run them inside QGIS (Python Console or Run Script), not from the system shell.
 
 | File | Purpose |
 |:-----|:--------|
@@ -68,5 +65,5 @@ Run **inside QGIS**, not from the system shell.
 | `pyqgis_number_grid_cells_sequential_per_state.py` | Fill `state_seq` by sorting cells per state (N→S, W→E). |
 | `pyqgis_join_grid_rowcol_from_index_layer_negative_buffer.py` | Transfer `row_value` / `col_value` with a slight negative-buffer spatial join. |
 | `pyqgis_subdivide_grid_cells_by_point_count_adaptive.py` | Adaptive subdivision by point counts; refresh `NUMPOINTS` / `grid_status`. |
-
-Each `pyqgis_*.py` file starts with a module docstring: required **layer names**, **fields** created, and **how to run**.
+| `pyqgis_mosaic_rgbnir.py` | Mosaic 4-band RGBNIR tiles listed by `NOMENC_10K` in a GeoPackage. |
+| `build-overviews-qgis.py` | Build external GeoTIFF overviews (`.tif.ovr`) for a folder. |
