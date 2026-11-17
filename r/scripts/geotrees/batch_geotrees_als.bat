@@ -5,14 +5,17 @@ title GeoTrees ALS
 chcp 65001 >nul
 
 REM =====================================================================
-REM  Edite estas tres variaveis. O resto pode ir na linha de comando.
+REM  Edite aqui. O resto pode ir na linha de comando.
 REM  BLOCO vazio = todos os .laz/.las da pasta.
-REM  BLOCO=EF    = so o campo BLOCO da articulacao IGC.
-REM  Varios blocos: EF,2024
+REM  Um bloco:    set "BLOCO=EF"
+REM  Dois blocos: set "BLOCO=EF,2024"
+REM  ARTICULACAO vazio = articulacao-igc-merged-spatialindex-sirgas2000.gpkg
+REM  na mesma pasta deste .bat, sem subpasta.
 REM =====================================================================
 set "LAZ_DIR=D:\laz"
 set "BLOCO="
-set "OUT_DIR=D:\geotrees_als"
+set "OUT_DIR=G:\geotrees_als"
+set "ARTICULACAO="
 
 REM Opcional. Vazio = nucleos fisicos - 2.
 set "N_CORES="
@@ -67,11 +70,13 @@ echo.
 set "BLOCO_ARG="
 set "CORES_ARG="
 set "LIMIT_ARG="
+set "ARTIC_ARG="
 if defined BLOCO set "BLOCO_ARG=--bloco %BLOCO%"
 if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
 if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
+if defined ARTICULACAO set "ARTIC_ARG=--articulacao %ARTICULACAO%"
 
-"%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %CORES_ARG% %LIMIT_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.
@@ -81,8 +86,4 @@ echo Registro:  %OUT_DIR%\geotrees_als_registry.csv
 echo GPKG:      %OUT_DIR%\geotrees_als_registro.gpkg
 echo.
 echo Se parou no meio ou deu erro em algum tile, rode este .bat de novo.
-echo O que ja terminou nesta maquina nao sera refeito.
-
-echo %cmdcmdline% | findstr /i /c:"%~f0" >nul
-if %errorlevel%==0 pause
-exit /b %RC%
+echo O que ja terminou nesta maquina nao sera r
