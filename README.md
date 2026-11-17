@@ -15,7 +15,7 @@ Initial scripts were reorganized from a local `scripts` folder into the layout b
 | `python/qgis/` | PyQGIS scripts (`pyqgis_*.py` and other QGIS console tools). Run inside QGIS. |
 | `python/scripts/` | Standalone CLI Python (`python script.py`). See `python/scripts/README.md`. |
 | `python/notebooks/` | Jupyter notebooks (`.ipynb`). |
-| `r/scripts/` | Plain R scripts (`.R`). |
+| `r/scripts/` | Plain R scripts (`.R`). GeoTrees ALS batch: [`r/scripts/geotrees/README.md`](r/scripts/geotrees/README.md). |
 | `r/quarto/` | Quarto documents (`.qmd`). |
 | `data/articulacao_igc_sp/` | Merged IGC-SP laser articulation GeoPackage (reference layer for AOI tile transfer). |
 | `data/sp-bounds.gpkg` | Sao Paulo polygons split by EPSG (`epsg31982`, `epsg31983`) for the RGBNIR filter. |

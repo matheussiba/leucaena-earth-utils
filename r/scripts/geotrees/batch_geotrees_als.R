@@ -194,7 +194,7 @@ help_text <- function() {
     "  --articulacao GPKG    Articulacao IGC. Padrao: data/articulacao_igc_sp/ no clone.",
     "  --articulacao-layer   Nome da camada.",
     "  --n-cores N           Padrao: nucleos fisicos - 2.",
-    "  --resolution M        Padrao 1 (igual ALS_processing.R).",
+    "  --resolution M        Padrao 1.",
     "  --size-tile M         Padrao 100.",
     "  --size-buffer M       Padrao 50.",
     "  --limit N             Processa so N tiles novos nesta rodada (0 = todos).",
