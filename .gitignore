@@ -22,6 +22,11 @@ renv/library/
 renv/python/
 renv/staging/
 
+# Official GeoTrees pipeline. Not in this repo. Place
+# ALS_processing_helperfunctions.R next to batch_geotrees_als.R to run.
+r/scripts/geotrees/ALS_processing.R
+r/scripts/geotrees/ALS_processing_helperfunctions.R
+
 # Quarto
 _quarto/
 *_files/
