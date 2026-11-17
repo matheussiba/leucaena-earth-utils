@@ -18,8 +18,9 @@ set "BLOCO="
 set "OUT_DIR=G:\geotrees_als"
 set "ARTICULACAO="
 
-REM Opcional. Vazio = nucleos fisicos - 2.
-set "N_CORES="
+REM Nucleos passados ao pipeline. 20 = padrao do laboratorio.
+REM Vazio = nucleos fisicos - 2.
+set "N_CORES=20"
 REM Opcional. Vazio = sem limite. 1 = so o primeiro tile novo (teste).
 set "LIMIT="
 
@@ -28,6 +29,7 @@ echo  GeoTrees ALS por tile
 echo  LAZ     : %LAZ_DIR%
 echo  BLOCO   : %BLOCO%  (vazio = pasta inteira)
 echo  Saida   : %OUT_DIR%
+echo  Nucleos : %N_CORES%  (vazio = fisicos - 2)
 echo  Produtos: %OUT_DIR%\processed\^<tile^>
 echo  GPKG    : %OUT_DIR%\geotrees_als_registro.gpkg
 echo  CSV     : %OUT_DIR%\geotrees_als_registry.csv
