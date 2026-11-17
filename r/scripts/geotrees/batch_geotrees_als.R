@@ -63,7 +63,7 @@ default_opt <- function() {
   list(
     laz_dir = "D:/laz",
     bloco = "",
-    out_dir = "D:/geotrees_als",
+    out_dir = "G:/geotrees_als",
     articulacao = "",
     articulacao_layer = "articulacao-igc-merged-spatialindex-sirgas2000",
     n_cores = NA_integer_,
@@ -189,8 +189,8 @@ help_text <- function() {
     "  --laz-dir DIR         Pasta dos .laz/.las (padrao D:/laz). Recursivo.",
     "  --bloco COD           Campo BLOCO da articulacao. Vazio = pasta inteira.",
     "                        Varios: EF,2024",
-    "  --out-dir DIR         Registro + produtos (padrao D:/geotrees_als).",
-    "  --articulacao GPKG    Articulacao IGC. Padrao: a do repositorio, senao D:\\_articulacao_igc_sp\\...",
+    "  --out-dir DIR         Registro + produtos (padrao G:/geotrees_als).",
+    "  --articulacao GPKG    Articulacao IGC. Padrao: o .gpkg na mesma pasta deste script.",
     "  --articulacao-layer   Nome da camada.",
     "  --n-cores N           Padrao: nucleos fisicos - 2.",
     "  --resolution M        Padrao 1 (igual ALS_processing.R).",
@@ -293,14 +293,14 @@ repo_root <- function(dir_script) {
 }
 
 default_articulacao <- function(dir_script) {
-  bundled <- file.path(
-    repo_root(dir_script), "data", "articulacao_igc_sp",
-    "articulacao-igc-merged-spatialindex-sirgas2000.gpkg"
-  )
-  local <- "D:/_articulacao_igc_sp/articulacao-igc-merged-spatialindex-sirgas2000.gpkg"
+  nome <- "articulacao-igc-merged-spatialindex-sirgas2000.gpkg"
+  ao_lado <- file.path(dir_script, nome)
+  if (file.exists(ao_lado)) return(normalizePath(ao_lado, winslash = "/"))
+  bundled <- file.path(repo_root(dir_script), "data", "articulacao_igc_sp", nome)
+  local <- file.path("D:/_articulacao_igc_sp", nome)
   if (file.exists(bundled)) return(normalizePath(bundled, winslash = "/"))
   if (file.exists(local)) return(normalizePath(local, winslash = "/"))
-  normalizePath(bundled, winslash = "/", mustWork = FALSE)
+  normalizePath(ao_lado, winslash = "/", mustWork = FALSE)
 }
 
 out_paths <- function(out_dir) {
@@ -319,7 +319,6 @@ out_paths <- function(out_dir) {
     summary = file.path(out_dir, "geotrees_als_summary.csv"),
     lock = file.path(out_dir, ".geotrees_als.lock"),
     runlog = file.path(out_dir, "geotrees_als_run.log"),
-    eta = file.path(out_dir, "geotrees_als_eta.txt"),
     artic_cache = file.path(out_dir, "articulacao_cache.gpkg"),
     parar = file.path(out_dir, "PARAR.txt")
   )
@@ -852,25 +851,7 @@ faltam_na_rodada <- function(plan, rodada) {
   max(0L, as.integer(n_go) - as.integer(n_feitos))
 }
 
-gravar_eta <- function(path, eta, n_faltam, este_min = NA_real_) {
-  linhas <- c(
-    paste0("Maquina: ", maquina()),
-    paste0("Atualizado: ", format(Sys.time(), "%d/%m/%Y %H:%M")),
-    paste0("Tiles ok usados na media: ", eta$n_base),
-    paste0("Tempo medio por tile: ", eta$texto_media),
-    paste0("Faltam: ", n_faltam),
-    paste0("Tempo restante: ", eta$texto),
-    paste0("Previsao de termino: ", if (nzchar(eta$previsao)) eta$previsao else "-"),
-    "A media e dos tiles que esta maquina ja concluiu. Cada arquivo novo recalcula a previsao.",
-    "Tile interrompido no meio nao entra na media: na proxima rodada ele comeca de novo."
-  )
-  if (!is.na(este_min)) {
-    linhas <- c(linhas, paste0("Ultimo arquivo: ", format_dhm(este_min)))
-  }
-  write_utf8(path, linhas)
-}
-
-mostrar_eta <- function(rodada, registry, n_faltam, este_min = NA_real_, path = NULL) {
+mostrar_eta <- function(rodada, registry, n_faltam, este_min = NA_real_) {
   eta <- eta_agora(rodada, registry, n_faltam)
   cat("\n")
   cat("------------------------------------------------------------\n")
@@ -891,9 +872,6 @@ mostrar_eta <- function(rodada, registry, n_faltam, este_min = NA_real_, path = 
   }
   cat("------------------------------------------------------------\n\n")
   flush.console()
-  if (!is.null(path)) {
-    try(gravar_eta(path, eta, n_faltam, este_min), silent = TRUE)
-  }
   eta
 }
 
@@ -1348,9 +1326,17 @@ main <- function() {
   idx <- build_index(data.frame())
   if (!artic_ok) {
     if (length(blocos)) {
-      stop("Articulacao nao encontrada e --bloco foi pedido:\n  ", opt$articulacao, call. = FALSE)
+      stop(
+        "Articulacao nao encontrada e BLOCO foi pedido:\n  ", opt$articulacao,
+        "\nColoque articulacao-igc-merged-spatialindex-sirgas2000.gpkg na mesma pasta do .bat, sem subpasta.",
+        call. = FALSE
+      )
     }
-    cat("AVISO: articulacao nao encontrada. Sem filtro de BLOCO, a pasta inteira entra na fila.\n")
+    cat("AVISO: articulacao nao encontrada em:\n  ", opt$articulacao, "\n", sep = "")
+    cat("BLOCO esta vazio, entao a pasta inteira entra na fila.\n")
+    cat("Para dois blocos, no .bat: set \"BLOCO=EF,2024\"\n")
+    cat("O GPKG tem que estar na mesma pasta do .bat, sem subpasta:\n")
+    cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
   } else {
     cat("Lendo articulacao (atributos): ", opt$articulacao, "\n", sep = "")
     idx <- build_index(read_artic_table(opt$articulacao, opt$articulacao_layer))
@@ -1413,8 +1399,6 @@ main <- function() {
     write_utf8(dest, linhas)
     if (!modo %in% c("dry", "lista")) {
       save_summary(paths$summary, opt, registry, plan, rodada, elapsed, modo)
-      eta <- eta_agora(rodada, registry, faltam_na_rodada(plan, rodada))
-      gravar_eta(paths$eta, eta, faltam_na_rodada(plan, rodada))
     }
     dest
   }
@@ -1470,7 +1454,7 @@ main <- function() {
   cat("Retomada: ", n_pulados, " tile(s) ja prontos nesta saida e nao serao refeitos.\n", sep = "")
   cat("Na fila agora: ", n_fila, ".\n", sep = "")
   cat("Se o script parou no meio de um .laz, esse arquivo comeca de novo. Os que ja terminaram ficam pulados.\n")
-  mostrar_eta(rodada, registry, n_fila, path = paths$eta)
+  mostrar_eta(rodada, registry, n_fila)
 
   for (i in seq_len(n_fila)) {
     if (file.exists(paths$parar)) {
@@ -1557,7 +1541,7 @@ main <- function() {
     }
     write_md(if (parou) "parado" else "rodada")
     faltam_depois <- n_fila - i
-    mostrar_eta(rodada, registry, faltam_depois, este_min = result$minutos, path = paths$eta)
+    mostrar_eta(rodada, registry, faltam_depois, este_min = result$minutos)
     log_line(
       paths$runlog,
       sprintf(

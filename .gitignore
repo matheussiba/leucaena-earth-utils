@@ -44,3 +44,5 @@ Thumbs.db
 
 # Exception: IGC-SP merged articulation used by transferir_laz_rgb_ir_v3_por_aoi.py
 !data/articulacao_igc_sp/articulacao-igc-merged-spatialindex-sirgas2000.gpkg
+# Same file beside the GeoTrees batch, so a copied script folder can filter by BLOCO
+!r/scripts/geotrees/articulacao-igc-merged-spatialindex-sirgas2000.gpkg
