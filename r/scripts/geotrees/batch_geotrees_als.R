@@ -233,15 +233,31 @@ clip_err <- function(x, n = 400L) {
   if (nchar(x) > n) paste0(substr(x, 1L, n), "...") else x
 }
 
-need_pkgs <- function(pkgs) {
-  miss <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+need_pkgs <- function(pkgs, para_que = "") {
+  pkgs <- unique(pkgs)
+  say(
+    "Conferindo pacotes R",
+    if (nzchar(para_que)) paste0(" (", para_que, ")") else "",
+    ", antes de varrer LAZ ou carregar o pipeline:"
+  )
+  miss <- character()
+  for (pkg in pkgs) {
+    if (requireNamespace(pkg, quietly = TRUE)) {
+      say("  ok    ", pkg)
+    } else {
+      say("  FALTA ", pkg)
+      miss <- c(miss, pkg)
+    }
+  }
   if (length(miss)) {
     stop(
       "Faltam pacotes R: ", paste(miss, collapse = ", "),
       "\nNo R: install.packages(c(\"", paste(miss, collapse = "\", \""), "\"))",
+      "\nNada foi processado. Instale e rode o .bat de novo.",
       call. = FALSE
     )
   }
+  say("Pacotes conferidos: ", length(pkgs), ".")
 }
 
 atomic_write <- function(path, write_fn) {
@@ -1237,15 +1253,7 @@ source_helper <- function(path) {
   if (!file.exists(path)) {
     stop("Nao achei o pipeline oficial: ", path, call. = FALSE)
   }
-  miss <- HELPER_PKGS[!vapply(HELPER_PKGS, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(miss)) {
-    stop(
-      "Faltam pacotes do GeoTrees: ", paste(miss, collapse = ", "),
-      "\nNo R: install.packages(c(\"", paste(miss, collapse = "\", \""), "\"))",
-      call. = FALSE
-    )
-  }
-  say("Carregando o pipeline oficial do GeoTrees. Esta parte carrega varios pacotes e pode demorar.")
+  say("Carregando o pipeline oficial do GeoTrees. Os pacotes ja foram conferidos no inicio.")
   say("  ", path)
   suppressPackageStartupMessages(sys.source(path, envir = globalenv()))
   if (!exists("process.dataset", mode = "function", envir = globalenv())) {
@@ -1429,7 +1437,14 @@ main <- function() {
   }
   if (opt$list_blocos) opt$dry_run <- TRUE
 
-  need_pkgs(c("data.table", "DBI", "RSQLite"))
+  base_pkgs <- c("data.table", "DBI", "RSQLite")
+  if (!opt$dry_run && !opt$report_only) {
+    need_pkgs(c(base_pkgs, HELPER_PKGS), "pipeline GeoTrees")
+  } else if (opt$report_only) {
+    need_pkgs(c(base_pkgs, "sf"), "relatorio e GPKG")
+  } else {
+    need_pkgs(base_pkgs, "plano, sem processar")
+  }
   suppressPackageStartupMessages(library(data.table))
   options(warn = 1, sf_use_s2 = FALSE)
   if (.Platform$OS.type == "windows") {
