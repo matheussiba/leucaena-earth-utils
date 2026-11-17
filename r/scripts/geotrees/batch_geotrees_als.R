@@ -1322,32 +1322,36 @@ save_summary <- function(path, opt, registry, plan, rodada, elapsed_min, modo) {
 inbox_for <- function(laz_dir, out_dir, inbox_padrao) {
   d1 <- drive_of(laz_dir)
   d2 <- drive_of(out_dir)
-  if (is.na(d1) || is.na(d2) || !identical(toupper(d1), toupper(d2))) {
-    if (is.na(d1)) {
-      stop("Nao consegui achar o disco de ", laz_dir, " para criar o hardlink.", call. = FALSE)
-    }
-    file.path(paste0(d1, "\\"), "geotrees_als_inbox")
-  } else {
-    inbox_padrao
+  if (!is.na(d1) && !is.na(d2) && !identical(toupper(d1), toupper(d2))) {
+    say(
+      "LAZ em ", toupper(d1), " e saida em ", toupper(d2),
+      ". O arquivo entra na saida por copia, porque hardlink nao cruza disco."
+    )
   }
+  inbox_padrao
 }
 
 link_into_inbox <- function(src, inbox, type_file) {
   dir.create(inbox, recursive = TRUE, showWarnings = FALSE)
   old <- list.files(inbox, full.names = TRUE, all.files = TRUE, no.. = TRUE)
-  if (length(old)) unlink(old, recursive = TRUE)
+  if (length(old)) unlink(old, recursive = TRUE, force = TRUE)
   stem <- tools::file_path_sans_ext(basename(src))
   dest <- file.path(inbox, paste0(stem, ".", type_file))
   ok <- suppressWarnings(file.link(src, dest))
+  if (isTRUE(ok) && file.exists(dest)) {
+    say("Atalho do LAZ: ", dest)
+    return(dest)
+  }
+  if (file.exists(dest)) unlink(dest, force = TRUE)
+  say("Copiando o LAZ para a saida: ", src)
+  ok <- file.copy(src, dest, overwrite = TRUE, copy.date = TRUE)
   if (!isTRUE(ok) || !file.exists(dest)) {
     stop(
-      "Nao criei hardlink de\n  ", src, "\npara\n  ", dest,
-      "\nO atalho e o LAZ precisam estar no mesmo disco NTFS.",
-      "\nDeixe --out-dir em ", substr(normalizePath(src, winslash = "\\", mustWork = FALSE), 1, 2),
-      "\\geotrees_als (padrao quando o LAZ esta em D:).",
+      "Nao copiei\n  ", src, "\npara\n  ", dest,
       call. = FALSE
     )
   }
+  say("Copia pronta: ", dest)
   dest
 }
 
