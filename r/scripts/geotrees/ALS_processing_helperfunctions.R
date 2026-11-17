@@ -1079,13 +1079,15 @@ las2las.initial = function(params_general, metadata, size_tile, path_output = ""
     
     output_filename <- file.path(path_output, "*.laz")
     
-    epsg_code <- as.numeric(strsplit(metadata$acq_crs, split = ":")[[1]][2])
+    epsg_code <- suppressWarnings(as.numeric(strsplit(as.character(metadata$acq_crs), split = ":")[[1]][2]))
     
-    clean_data_pipeline <-  lasR::reader(
-      filter = filter
-    ) + lasR::set_crs(epsg_code) + lasR::write_las(output_filename)
+    clean_data_pipeline <- lasR::reader(filter = filter)
+    if (length(epsg_code) == 1L && !is.na(epsg_code)) {
+      clean_data_pipeline <- clean_data_pipeline + lasR::set_crs(epsg_code)
+    }
+    clean_data_pipeline <- clean_data_pipeline + lasR::write_las(output_filename)
     
-    files <- list.files(params_general$path_data, pattern = paste0("\\.", type_file), full.names = TRUE)
+    files <- list.files(params_general$path_data, pattern = paste0("\\.", params_general$type_file), full.names = TRUE)
     
     lasR::exec(
       clean_data_pipeline,
@@ -1109,7 +1111,7 @@ las2las.initial = function(params_general, metadata, size_tile, path_output = ""
     
     if (params_general$cleanup == T) {
       cat("Removing copied files\n")
-      copied_files = list.files(params_general$path_data, pattern=paste0("\\.", type_file), full.names = TRUE)
+      copied_files = list.files(params_general$path_data, pattern=paste0("\\.", params_general$type_file), full.names = TRUE)
       file.remove(copied_files)}
     
     cat("Amending file path\n")
