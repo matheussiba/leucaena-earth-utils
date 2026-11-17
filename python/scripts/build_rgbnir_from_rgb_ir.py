@@ -73,6 +73,13 @@ does not reproject that polygon. Each TIFF is tested by its header bounds,
 not by its pixels. That result is stored in ``rgbnir_sp_vistoria.csv`` and
 reused on the next run. Set ``FORCE_SP_VISTORIA = True`` or pass ``--force-sp``
 to compare every TIFF again.
+
+When every pair is already on disk (or the queue finishes with nothing left),
+the script builds external ``.tif.ovr`` pyramids with 5 levels around the
+full-image view (~512 px longest side): two finer steps (typically 16 and
+32), the whole-image factor, and two coarser steps (e.g. 16, 32, 64, 128,
+256). Existing ``.ovr`` files are skipped unless ``--force-ovr``. Use
+``--no-ovr`` to skip this pass.
 """
 
 from __future__ import annotations
@@ -84,6 +91,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -136,7 +144,14 @@ COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.12.0"
+VERSION = "1.13.3"
+
+# External .ovr after all RGBNIR tiles exist: 5 levels around full-image view
+# (2 finer e.g. 16/32 + whole ~512px factor + 2 coarser).
+OVR_N_LEVELS = 5
+OVR_N_FINER = 2
+OVR_WHOLE_SIDE_PX = 512
+OVR_MIN_SIDE_PX = 16
 
 # Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
 _ID_COLUMN_BY_LAYER = {
@@ -3089,6 +3104,309 @@ def apply_result(row: dict[str, str], result: dict, *, run_id: str, out_dir: Pat
 
 
 # -----------------------------------------------------------------------------
+# External overviews (.tif.ovr) — 5 levels around full-image view
+# -----------------------------------------------------------------------------
+
+def coarse_overview_factors(
+    width: int,
+    height: int,
+    *,
+    n_levels: int = OVR_N_LEVELS,
+    n_finer: int = OVR_N_FINER,
+    whole_side: int = OVR_WHOLE_SIDE_PX,
+    min_side: int = OVR_MIN_SIDE_PX,
+) -> list[int]:
+    """Return up to ``n_levels`` power-of-2 overview factors.
+
+    Finds the factor that fits the longest side near ``whole_side`` px, then
+    starts ``n_finer`` powers of two finer (typically 16 and 32) and walks
+    coarser until ``n_levels`` factors are filled (e.g. 16, 32, 64, 128, 256).
+    """
+    w = int(width)
+    h = int(height)
+    if w <= 0 or h <= 0 or n_levels <= 0:
+        return []
+    longest = max(w, h)
+    shortest = min(w, h)
+    if longest < whole_side * 2:
+        return []
+    whole = 2
+    while longest // whole > whole_side:
+        whole *= 2
+        if whole > 8192:
+            break
+    start = whole
+    for _ in range(max(0, int(n_finer))):
+        if start // 2 < 2:
+            break
+        start //= 2
+    levels: list[int] = []
+    cur = start
+    for _ in range(n_levels):
+        if shortest // cur < min_side:
+            break
+        levels.append(cur)
+        cur *= 2
+        if cur > 16384:
+            break
+    return levels
+
+
+def _ovr_sidecar_path(tif_path: Path) -> Path:
+    return Path(str(tif_path) + ".ovr")
+
+
+def _find_gdaladdo() -> str | None:
+    """Prefer gdaladdo.exe so overviews can be forced external with ``-ro``."""
+    found = shutil.which("gdaladdo")
+    if found:
+        return found
+    roots = [
+        Path(r"C:\Program Files"),
+        Path(r"C:\Program Files (x86)"),
+        Path(r"C:\OSGeo4W64"),
+        Path(r"C:\OSGeo4W"),
+    ]
+    patterns = [
+        "QGIS*/bin/gdaladdo.exe",
+        "bin/gdaladdo.exe",
+        "apps/gdal/bin/gdaladdo.exe",
+    ]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for pattern in patterns:
+            matches = sorted(root.glob(pattern), reverse=True)
+            if matches:
+                return str(matches[0])
+    return None
+
+
+def _has_internal_overviews(tif_path: Path) -> bool:
+    try:
+        with rasterio.open(tif_path) as src:
+            return any(bool(src.overviews(i)) for i in src.indexes)
+    except Exception:
+        return False
+
+
+def _clean_internal_overviews(tif_path: Path, gdaladdo: str) -> bool:
+    """Remove internal pyramids so a later ``gdaladdo -ro`` can write ``.ovr``."""
+    try:
+        proc = subprocess.run(
+            [gdaladdo, "-clean", str(tif_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            log(f"  OVR: gdaladdo -clean falhou em {tif_path.name}: {err or proc.returncode}")
+            return False
+        return True
+    except OSError as exc:
+        log(f"  OVR: nao rodou gdaladdo -clean em {tif_path.name}: {exc}")
+        return False
+
+
+def _build_overviews_gdaladdo(
+    tif_path: Path,
+    factors: list[int],
+    *,
+    gdaladdo: str,
+    gdal_threads: int,
+) -> bool:
+    threads = "ALL_CPUS" if gdal_threads <= 0 else str(gdal_threads)
+    cmd = [
+        gdaladdo,
+        "-ro",
+        "-r",
+        "average",
+        "--config",
+        "COMPRESS_OVERVIEW",
+        COMPRESS,
+        "--config",
+        "PREDICTOR_OVERVIEW",
+        "2",
+        "--config",
+        "BIGTIFF_OVERVIEW",
+        "IF_SAFER",
+        "--config",
+        "GDAL_TIFF_OVR_BLOCKSIZE",
+        str(BLOCK),
+        "--config",
+        "GDAL_NUM_THREADS",
+        threads,
+        str(tif_path),
+        *[str(f) for f in factors],
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        log(f"  OVR: gdaladdo -ro falhou em {tif_path.name}: {err or proc.returncode}")
+        return False
+    return True
+
+
+def _build_overviews_osgeo(tif_path: Path, factors: list[int], *, gdal_threads: int) -> bool:
+    from osgeo import gdal  # type: ignore[import-untyped]
+
+    threads = "ALL_CPUS" if gdal_threads <= 0 else str(gdal_threads)
+    gdal.SetConfigOption("COMPRESS_OVERVIEW", COMPRESS)
+    gdal.SetConfigOption("PREDICTOR_OVERVIEW", "2")
+    gdal.SetConfigOption("BIGTIFF_OVERVIEW", "IF_SAFER")
+    gdal.SetConfigOption("GDAL_TIFF_OVR_BLOCKSIZE", str(BLOCK))
+    gdal.SetConfigOption("GDAL_NUM_THREADS", threads)
+    gdal.SetConfigOption("GDAL_TIFF_OVR_LAYOUT", "EXTERNAL")
+    ds = gdal.Open(str(tif_path), gdal.GA_ReadOnly)
+    if ds is None:
+        log(f"  OVR: GDAL nao abriu {tif_path.name}")
+        return False
+    try:
+        code = ds.BuildOverviews("AVERAGE", factors)
+    finally:
+        ds = None
+    if code != 0:
+        log(f"  OVR BuildOverviews codigo={code} em {tif_path.name}")
+        return False
+    return True
+
+
+def build_external_overviews(
+    tif_path: Path,
+    *,
+    force: bool = False,
+    gdal_threads: int = 0,
+) -> str:
+    """Build external ``.tif.ovr`` with 5 levels (incl. 16/32). Returns status tag."""
+    path = Path(tif_path)
+    ovr_path = _ovr_sidecar_path(path)
+    if ovr_path.exists() and not force:
+        return "pulado"
+    if not path.is_file() or path.stat().st_size <= 0:
+        return "ausente"
+
+    try:
+        with rasterio.open(path) as src:
+            width, height = int(src.width), int(src.height)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  OVR falhou ao abrir {path.name}: {exc}")
+        return "falha"
+
+    factors = coarse_overview_factors(width, height)
+    if not factors:
+        return "sem_nivel"
+
+    if force:
+        _remove_quiet(ovr_path)
+
+    gdaladdo = _find_gdaladdo()
+    # Internal pyramids (from an older rasterio r+ attempt) block a clean external .ovr.
+    if _has_internal_overviews(path):
+        if not gdaladdo:
+            log(
+                f"  OVR: {path.name} ja tem piramide interna e nao achei gdaladdo "
+                "para limpar/gerar .ovr externo."
+            )
+            return "falha"
+        if not _clean_internal_overviews(path, gdaladdo):
+            return "falha"
+
+    ok = False
+    try:
+        if gdaladdo:
+            ok = _build_overviews_gdaladdo(
+                path, factors, gdaladdo=gdaladdo, gdal_threads=gdal_threads
+            )
+        else:
+            try:
+                ok = _build_overviews_osgeo(path, factors, gdal_threads=gdal_threads)
+            except ImportError:
+                log(
+                    "  OVR: sem gdaladdo no PATH/QGIS e sem modulo osgeo. "
+                    "Instale QGIS/OSGeo4W ou use um Python com GDAL bindings."
+                )
+                return "falha"
+    except Exception as exc:  # noqa: BLE001
+        _remove_quiet(ovr_path)
+        log(f"  OVR falhou em {path.name}: {exc}")
+        return "falha"
+
+    if not ok or not ovr_path.exists():
+        _remove_quiet(ovr_path)
+        if ok and not ovr_path.exists():
+            log(f"  OVR: .ovr nao apareceu apos build em {path.name}")
+        return "falha"
+    return "ok"
+
+
+def build_overviews_for_finished(
+    pairs: list[dict[str, str]],
+    *,
+    out_dir: Path,
+    force: bool = False,
+    gdal_threads: int = 0,
+) -> dict[str, int]:
+    """After all RGBNIR tiles exist, create missing external .ovr (5 levels)."""
+    targets: list[Path] = []
+    seen: set[str] = set()
+    for row in pairs:
+        if row.get("tipo_registro") and row["tipo_registro"] != "par":
+            continue
+        status = (row.get("status") or "").strip()
+        if status not in {"ok", "pulado_ja_existe"}:
+            continue
+        name = (row.get("saida_nome") or "").strip()
+        if not name:
+            continue
+        path = out_dir / name
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(path)
+
+    counts = {"ok": 0, "pulado": 0, "falha": 0, "ausente": 0, "sem_nivel": 0}
+    if not targets:
+        log("Overviews: nenhum TIFF pronto para .ovr.")
+        return counts
+
+    log("-" * 78)
+    log(
+        f"Overviews externos (.ovr): {len(targets)} TIFF(s) | "
+        f"{OVR_N_LEVELS} niveis "
+        f"({OVR_N_FINER} mais finos tip. 16/32 + imagem ~{OVR_WHOLE_SIDE_PX}px + "
+        f"{max(0, OVR_N_LEVELS - OVR_N_FINER - 1)} mais grossos) | "
+        f"{'FORCAR refazer' if force else 'pular se .ovr ja existe'}"
+    )
+    started = time.time()
+    for index, path in enumerate(targets, 1):
+        t0 = time.time()
+        tag = build_external_overviews(path, force=force, gdal_threads=gdal_threads)
+        counts[tag] = counts.get(tag, 0) + 1
+        factors_txt = ""
+        if tag == "ok":
+            try:
+                with rasterio.open(path) as src:
+                    factors_txt = str(coarse_overview_factors(src.width, src.height))
+            except Exception:
+                factors_txt = "?"
+        if tag != "pulado" or index == 1 or index == len(targets) or index % 50 == 0:
+            log(
+                f"  OVR [{index}/{len(targets)}] {tag}"
+                f"{(' levels=' + factors_txt) if factors_txt else ''} "
+                f"{path.name} ({fmt_duration(time.time() - t0)})"
+            )
+    log(
+        f"Overviews concluido em {fmt_duration(time.time() - started)} | "
+        f"ok={counts['ok']} pulado={counts['pulado']} falha={counts['falha']} "
+        f"ausente={counts['ausente']} sem_nivel={counts['sem_nivel']}"
+    )
+    log("-" * 78)
+    return counts
+
+
+# -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
 
@@ -3174,6 +3492,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="So escaneia, pareia e escreve os CSV. Nao grava GeoTIFF.",
     )
+    parser.add_argument(
+        "--no-ovr",
+        action="store_true",
+        help=(
+            "Nao gera .ovr depois que todos os pares estiverem prontos. "
+            "Por padrao, cria overviews externos com 5 niveis (16/32 + imagem + 2 grossos)."
+        ),
+    )
+    parser.add_argument(
+        "--force-ovr",
+        action="store_true",
+        help="Refaz .ovr mesmo se o sidecar ja existir (so quando a passada de ovr rodar).",
+    )
     return parser.parse_args(argv)
 
 
@@ -3218,6 +3549,15 @@ def _print_banner(args: argparse.Namespace, run_id: str, gdal_threads: int) -> N
         f"O que ja estiver em {args.out} com tamanho > 0 e pulado."
     )
     log(f"Workers={max(1, args.workers)} | threads GDAL/tile={gdal_threads} | cache={args.cache_mb} MB")
+    if getattr(args, "no_ovr", False):
+        log("Overviews (.ovr) -> desligados (--no-ovr).")
+    else:
+        log(
+            f"Overviews (.ovr) -> depois de tudo pronto: {OVR_N_LEVELS} niveis "
+            f"({OVR_N_FINER} mais finos tip. 16/32 + imagem ~{OVR_WHOLE_SIDE_PX}px + "
+            f"{max(0, OVR_N_LEVELS - OVR_N_FINER - 1)} mais grossos)"
+            + ("; FORCAR refazer" if getattr(args, "force_ovr", False) else "; pula .ovr existente")
+        )
     if args.dry_run:
         log("MODO DRY-RUN: nenhum GeoTIFF sera gravado. So o CSV.")
     if args.overwrite:
@@ -3873,6 +4213,16 @@ def main(argv: list[str] | None = None) -> int:
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
         log("CSV inicial gravado, antes de comecar a fundir. Da para abrir o resumo enquanto roda (melhor copiar o arquivo).")
 
+        def _maybe_build_overviews(*, all_done: bool) -> None:
+            if args.dry_run or args.no_ovr or not all_done:
+                return
+            build_overviews_for_finished(
+                pairing_pairs,
+                out_dir=out_dir,
+                force=bool(args.force_ovr),
+                gdal_threads=gdal_threads,
+            )
+
         if not pairing_pairs:
             log("Nenhum par RGB+IR. Nada foi fundido. Confira os nomes no CSV (rgb_sem_ir / ir_sem_rgb).")
             _print_final(all_rows, out_dir, started)
@@ -3885,6 +4235,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if not queue:
             log("Nada novo para gravar. Todos os pares ja estao em " + str(out_dir))
+            _maybe_build_overviews(all_done=True)
             _print_final(all_rows, out_dir, started)
             return 0
 
@@ -3917,6 +4268,12 @@ def main(argv: list[str] | None = None) -> int:
             grade_cache=grade_cache,
             grade_cache_path=grade_path,
         )
+        still_missing = sum(
+            1
+            for row in pairing_pairs
+            if row.get("status") in {"pendente", "falha", "interrompido"}
+        )
+        _maybe_build_overviews(all_done=(outcome == "ok" and still_missing == 0))
         _print_final(all_rows, out_dir, started)
         if outcome == "interrompido":
             return 130
