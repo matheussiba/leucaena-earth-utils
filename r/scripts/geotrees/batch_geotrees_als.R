@@ -237,15 +237,14 @@ clip_err <- function(x, n = 400L) {
 
 need_pkgs <- function(pkgs, para_que = "") {
   pkgs <- unique(pkgs)
-  say(
-    "Conferindo pacotes R",
-    if (nzchar(para_que)) paste0(" (", para_que, ")") else "",
-    ", antes de varrer LAZ ou carregar o pipeline:"
+  anunciar <- nzchar(para_que)
+  if (anunciar) say(
+    "Conferindo pacotes R (", para_que, "), antes de varrer LAZ ou carregar o pipeline:"
   )
   miss <- character()
   for (pkg in pkgs) {
     if (requireNamespace(pkg, quietly = TRUE)) {
-      say("  ok    ", pkg)
+      if (anunciar) say("  ok    ", pkg)
     } else {
       say("  FALTA ", pkg)
       miss <- c(miss, pkg)
@@ -259,7 +258,7 @@ need_pkgs <- function(pkgs, para_que = "") {
       call. = FALSE
     )
   }
-  say("Pacotes conferidos: ", length(pkgs), ".")
+  if (anunciar) say("Pacotes conferidos: ", length(pkgs), ".")
 }
 
 atomic_write <- function(path, write_fn) {
@@ -1362,13 +1361,28 @@ tile_success <- function(out_tile) {
   info <- list.files(out_tile, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
   err <- list.files(out_tile, pattern = "^_ERROR\\.txt$", recursive = TRUE, full.names = TRUE)
   if (length(err)) {
-    msg <- clip_err(paste(readLines(err[[1]], warn = FALSE, n = 20), collapse = " "))
+    msg <- clip_err(paste(readLines(err[[1]], warn = FALSE, n = 40), collapse = " "), 1200)
     return(list(ok = FALSE, erro = if (nzchar(msg)) msg else "pipeline gravou _ERROR.txt"))
   }
   if (!length(info)) {
     return(list(ok = FALSE, erro = "pipeline terminou sem _INFO_summary_processing.csv"))
   }
   list(ok = TRUE, erro = "")
+}
+
+issue_text <- function(logfile) {
+  if (!nzchar(logfile) || !file.exists(logfile)) return("")
+  dt <- tryCatch(
+    data.table::fread(logfile, showProgress = FALSE, fill = TRUE),
+    error = function(e) NULL
+  )
+  if (is.null(dt) || !nrow(dt)) return("")
+  col <- if ("issue" %in% names(dt)) "issue" else names(dt)[ncol(dt)]
+  txt <- paste(unique(as.character(dt[[col]])), collapse = " | ")
+  txt <- gsub("[\r\n\t]+", " ", txt)
+  txt <- trimws(txt)
+  if (!nzchar(txt)) return("")
+  clip_err(txt, 1200)
 }
 
 source_helper <- function(path) {
@@ -1426,19 +1440,19 @@ run_one <- function(src, opt, paths, inbox, metadata) {
   )
   minutos <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
   unlink(dest)
+  detalhe <- issue_text(logfile)
+  pasta <- if (dir.exists(out_tile)) normalizePath(out_tile, winslash = "/") else out_tile
   if (inherits(status, "error")) {
-    return(list(
-      ok = FALSE, erro = clip_err(conditionMessage(status)),
-      minutos = minutos, pasta_saida = normalizePath(out_tile, winslash = "/", mustWork = FALSE)
-    ))
+    erro <- clip_err(conditionMessage(status), 1200)
+    if (nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
+    if (nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
+    return(list(ok = FALSE, erro = erro, minutos = minutos, pasta_saida = pasta))
   }
   check <- tile_success(out_tile)
-  list(
-    ok = check$ok,
-    erro = check$erro,
-    minutos = minutos,
-    pasta_saida = if (dir.exists(out_tile)) normalizePath(out_tile, winslash = "/") else out_tile
-  )
+  erro <- check$erro
+  if (!check$ok && nzchar(detalhe)) erro <- detalhe
+  if (!check$ok && nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
+  list(ok = check$ok, erro = erro, minutos = minutos, pasta_saida = pasta)
 }
 
 blank_meta <- function(plan_row) {
@@ -1792,10 +1806,13 @@ main <- function() {
     iniciado <- utc_now()
     result <- tryCatch(
       run_one(meta$laz_path, opt, paths, inbox, metadata),
-      error = function(e) list(ok = FALSE, erro = clip_err(conditionMessage(e)), minutos = NA_real_, pasta_saida = "")
+      error = function(e) list(ok = FALSE, erro = clip_err(conditionMessage(e), 1200), minutos = NA_real_, pasta_saida = "")
     )
     status <- if (isTRUE(result$ok)) "processed" else "erro"
-    if (status == "erro") n_erro_run <- n_erro_run + 1L
+    if (status == "erro") {
+      n_erro_run <- n_erro_run + 1L
+      say("FALHOU ", meta$tile_id, ": ", result$erro)
+    }
     row <- list(
       tile_id = meta$tile_id,
       laz_nome = meta$laz_nome,
@@ -1854,9 +1871,9 @@ main <- function() {
     log_line(
       paths$runlog,
       sprintf(
-        "[%d/%d] %s %s | este %s | faltam %d | restante %s",
+        "[%d/%d] %s %s | %s | faltam %d | restante %s",
         i, n_fila, toupper(status), row$tile_id,
-        format_dhm(result$minutos),
+        if (status == "erro") paste0("motivo: ", row$erro) else paste0("este ", format_dhm(result$minutos)),
         faltam_depois,
         eta_agora(rodada, registry, faltam_depois)$texto
       )
