@@ -1,0 +1,88 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0"
+title GeoTrees ALS
+chcp 65001 >nul
+
+REM =====================================================================
+REM  Edite estas tres variaveis. O resto pode ir na linha de comando.
+REM  BLOCO vazio = todos os .laz/.las da pasta.
+REM  BLOCO=EF    = so o campo BLOCO da articulacao IGC.
+REM  Varios blocos: EF,2024
+REM =====================================================================
+set "LAZ_DIR=D:\laz"
+set "BLOCO="
+set "OUT_DIR=D:\geotrees_als"
+
+REM Opcional. Vazio = nucleos fisicos - 2.
+set "N_CORES="
+REM Opcional. Vazio = sem limite. 1 = so o primeiro tile novo (teste).
+set "LIMIT="
+
+echo ============================================================
+echo  GeoTrees ALS por tile
+echo  LAZ     : %LAZ_DIR%
+echo  BLOCO   : %BLOCO%  (vazio = pasta inteira)
+echo  Saida   : %OUT_DIR%
+echo  Produtos: %OUT_DIR%\processed\^<tile^>
+echo  GPKG    : %OUT_DIR%\geotrees_als_registro.gpkg
+echo  CSV     : %OUT_DIR%\geotrees_als_registry.csv
+echo  MD      : %OUT_DIR%\geotrees_als_relatorio.md
+echo.
+echo  Pula tile que ja tem _INFO_summary_processing.csv nesta saida.
+echo  Se parar no meio, rode de novo: continua do que falta.
+echo  O .laz interrompido comeca de novo; os que ja terminaram nao.
+echo  A cada arquivo a previsao do que falta e recalculada (dias, horas, minutos).
+echo  Erro entra de novo na proxima rodada. --force refaz tudo.
+echo  Teste sem processar:  --dry-run     ou  --list-blocos
+echo  So o relatorio:       --report-only
+echo  Parar entre tiles: crie %OUT_DIR%\PARAR.txt
+echo ============================================================
+echo.
+
+set "RS="
+where Rscript >nul 2>&1 && set "RS=Rscript"
+if not defined RS (
+    for /f "delims=" %%D in ('dir /b /ad /o-n "C:\Program Files\R" 2^>nul') do (
+        if not defined RS if exist "C:\Program Files\R\%%D\bin\Rscript.exe" set "RS=C:\Program Files\R\%%D\bin\Rscript.exe"
+    )
+)
+if not defined RS (
+    for /f "delims=" %%D in ('dir /b /ad /o-n "C:\Program Files\R" 2^>nul') do (
+        if not defined RS if exist "C:\Program Files\R\%%D\bin\x64\Rscript.exe" set "RS=C:\Program Files\R\%%D\bin\x64\Rscript.exe"
+    )
+)
+if not defined RS (
+    echo [ERRO] Rscript nao esta no PATH e nao achei em "C:\Program Files\R".
+    echo Instale o R e rode este .bat de novo.
+    echo.
+    pause
+    exit /b 2
+)
+
+echo Usando: %RS%
+echo Argumentos extras: %*
+echo.
+
+set "BLOCO_ARG="
+set "CORES_ARG="
+set "LIMIT_ARG="
+if defined BLOCO set "BLOCO_ARG=--bloco %BLOCO%"
+if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
+if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
+
+"%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %CORES_ARG% %LIMIT_ARG% %*
+set "RC=%ERRORLEVEL%"
+
+echo.
+echo Terminou com codigo %RC%.
+echo Relatorio: %OUT_DIR%\geotrees_als_relatorio.md
+echo Registro:  %OUT_DIR%\geotrees_als_registry.csv
+echo GPKG:      %OUT_DIR%\geotrees_als_registro.gpkg
+echo.
+echo Se parou no meio ou deu erro em algum tile, rode este .bat de novo.
+echo O que ja terminou nesta maquina nao sera refeito.
+
+echo %cmdcmdline% | findstr /i /c:"%~f0" >nul
+if %errorlevel%==0 pause
+exit /b %RC%
