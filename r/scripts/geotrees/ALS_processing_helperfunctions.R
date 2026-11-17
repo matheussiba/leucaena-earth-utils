@@ -1150,7 +1150,7 @@ find.clusters_data = function(params_general, path_output = "", nbclusters_force
   }
   if(!dir.exists(path_output)) dir.create(path_output)
   
-  if(!is.voidstring(params_general$path_lastools) & file.exists(file.path(path_lastools,"lastoolslicense.txt"))){
+  if(!is.voidstring(params_general$path_lastools) && file.exists(file.path(params_general$path_lastools,"lastoolslicense.txt"))){
     # create output directory for temporary processing
     path_tmp = file.path(params_general$path_data,"tmp")
     if(!dir.exists(path_tmp)) dir.create(path_tmp)
@@ -5957,16 +5957,17 @@ process.dataset = function(name_job, type_file, dir_dataset, dir_processed, tmpd
           }
         )
         
-        information_processing[i]$status = status
+        if (is.null(status)) status = "error"
+        information_processing[i, status := as.character(status)]
       } 
       
       time_end = Sys.time()
       time_processing = difftime(time_end,time_start,units = "mins")
       
       # append to the general output files
-      information_processing[i]$time_start = as.character(format(time_start,"%d/%m/%Y %Hh%M"))
-      information_processing[i]$time_end = as.character(format(time_end,"%d/%m/%Y %Hh%M"))
-      information_processing[i]$time_processing_minutes = as.character(round(time_processing))
+      information_processing[i, time_start := as.character(format(time_start,"%d/%m/%Y %Hh%M"))]
+      information_processing[i, time_end := as.character(format(time_end,"%d/%m/%Y %Hh%M"))]
+      information_processing[i, time_processing_minutes := as.character(round(as.numeric(time_processing)))]
       
       # v.1.0.0 remove default printing of job summary. Since jobs can be run at different levels, this might be confusing. Summary information is included for each geo-unit anyways
       if(print.summary_job == T){

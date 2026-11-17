@@ -54,6 +54,7 @@ HELPER_PKGS <- c(
   "Hmisc", "data.table", "terra", "sf", "igraph", "viridisLite",
   "lidR", "lasR", "future"
 )
+LASR_REPO <- "https://r-lidar.r-universe.dev"
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -235,6 +236,17 @@ clip_err <- function(x, n = 400L) {
   if (nchar(x) > n) paste0(substr(x, 1L, n), "...") else x
 }
 
+install_pkg <- function(pkg) {
+  if (identical(pkg, "lasR")) {
+    say("Instalando lasR. O CRAN nao tem esse pacote.")
+    say("  install.packages(\"lasR\", repos = \"", LASR_REPO, "\")")
+    install.packages("lasR", repos = LASR_REPO)
+  } else {
+    say("Instalando ", pkg)
+    install.packages(pkg)
+  }
+}
+
 need_pkgs <- function(pkgs, para_que = "") {
   pkgs <- unique(pkgs)
   anunciar <- nzchar(para_que)
@@ -251,12 +263,27 @@ need_pkgs <- function(pkgs, para_que = "") {
     }
   }
   if (length(miss)) {
-    stop(
-      "Faltam pacotes R: ", paste(miss, collapse = ", "),
-      "\nNo R: install.packages(c(\"", paste(miss, collapse = "\", \""), "\"))",
-      "\nNada foi processado. Instale e rode o .bat de novo.",
-      call. = FALSE
-    )
+    for (pkg in miss) {
+      tryCatch(install_pkg(pkg), error = function(e) say("  falha ao instalar ", pkg, ": ", conditionMessage(e)))
+    }
+    ainda <- miss[!vapply(miss, requireNamespace, logical(1), quietly = TRUE)]
+    if (length(ainda)) {
+      dica <- character()
+      if ("lasR" %in% ainda) {
+        dica <- c(dica, paste0("install.packages(\"lasR\", repos = \"", LASR_REPO, "\")"))
+      }
+      outros <- setdiff(ainda, "lasR")
+      if (length(outros)) {
+        dica <- c(dica, paste0("install.packages(c(\"", paste(outros, collapse = "\", \""), "\"))"))
+      }
+      stop(
+        "Faltam pacotes R: ", paste(ainda, collapse = ", "),
+        "\nNo R:\n", paste(dica, collapse = "\n"),
+        "\nNada foi processado. Instale e rode de novo.",
+        call. = FALSE
+      )
+    }
+    say("Pacotes que faltavam foram instalados.")
   }
   if (anunciar) say("Pacotes conferidos: ", length(pkgs), ".")
 }
