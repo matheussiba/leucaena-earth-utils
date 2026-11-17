@@ -1260,20 +1260,74 @@ log_line <- function(path, ...) {
   cat(msg, "\n", file = path, append = TRUE)
 }
 
+read_lock_pid <- function(path) {
+  lines <- tryCatch(readLines(path, warn = FALSE), error = function(e) character())
+  hit <- grep("^pid=", lines, value = TRUE)
+  if (!length(hit)) return(NA_integer_)
+  pid <- suppressWarnings(as.integer(sub("^pid=", "", hit[[1]])))
+  if (length(pid) != 1L || is.na(pid) || pid <= 0L) NA_integer_ else pid
+}
+
+pid_is_running <- function(pid) {
+  pid <- suppressWarnings(as.integer(pid))
+  if (length(pid) != 1L || is.na(pid) || pid <= 0L) return(FALSE)
+  if (.Platform$OS.type != "windows") {
+    return(system2("kill", c("-0", as.character(pid)), stdout = FALSE, stderr = FALSE) == 0L)
+  }
+  out <- tryCatch(
+    system2(
+      "tasklist",
+      c("/FI", sprintf("PID eq %d", pid), "/FO", "CSV", "/NH"),
+      stdout = TRUE,
+      stderr = TRUE
+    ),
+    error = function(e) character()
+  )
+  if (!length(out)) return(NA)
+  if (any(grepl(sprintf("\"%d\"", pid), out, fixed = TRUE))) return(TRUE)
+  status <- attr(out, "status")
+  if (!is.null(status) && !identical(as.integer(status), 0L)) return(NA)
+  FALSE
+}
+
+stop_lock_busy <- function(...) {
+  cond <- simpleError(paste0(...))
+  class(cond) <- c("geotrees_lock_busy", class(cond))
+  stop(cond)
+}
+
 acquire_lock <- function(path) {
   if (file.exists(path)) {
-    age_h <- as.numeric(difftime(Sys.time(), file.info(path)$mtime, units = "hours"))
-    if (!is.na(age_h) && age_h < 6) {
+    pid <- read_lock_pid(path)
+    vivo <- pid_is_running(pid)
+    if (isTRUE(vivo)) {
       msg <- paste(readLines(path, warn = FALSE), collapse = " | ")
-      stop(
-        "Ja existe uma rodada nesta OUT_DIR (lock com ", round(age_h, 2), " h).\n",
-        msg, "\nSe o outro processo morreu, apague:\n  ", path,
-        call. = FALSE
+      stop_lock_busy(
+        "Ja existe uma copia deste script rodando (PID ", pid, ").\n",
+        "Trava: ", path, "\n",
+        msg, "\n",
+        "A outra janela continua. Esta sera fechada."
       )
     }
+    if (is.na(vivo)) {
+      age_h <- as.numeric(difftime(Sys.time(), file.info(path)$mtime, units = "hours"))
+      if (!is.na(age_h) && age_h < 6) {
+        stop_lock_busy(
+          "Nao consegui confirmar se o PID da trava ainda existe.\n",
+          "Trava: ", path, "\n",
+          "A outra janela, se ainda estiver aberta, continua. Esta sera fechada."
+        )
+      }
+    }
+    cat(
+      "Trava antiga encontrada (PID ", if (is.na(pid)) "?" else pid,
+      " nao esta mais rodando). Vou remove-la e continuar.\n",
+      sep = ""
+    )
     unlink(path)
   }
   writeLines(c(maquina(), usuario(), utc_now(), paste0("pid=", Sys.getpid())), path)
+  invisible(TRUE)
 }
 
 resolve_cores <- function(n) {
@@ -1579,9 +1633,16 @@ is_entry <- function() {
 }
 
 if (is_entry()) {
-  code <- tryCatch(main(), error = function(e) {
-    cat("\n[ERRO] ", conditionMessage(e), "\n", sep = "")
-    2L
-  })
+  code <- tryCatch(
+    main(),
+    geotrees_lock_busy = function(e) {
+      cat("\n[ERRO] ", conditionMessage(e), "\n", sep = "")
+      3L
+    },
+    error = function(e) {
+      cat("\n[ERRO] ", conditionMessage(e), "\n", sep = "")
+      2L
+    }
+  )
   quit(status = as.integer(code), save = "no")
 }

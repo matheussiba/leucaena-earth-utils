@@ -98,6 +98,9 @@ echo.
 "%RS%" "%~dp0batch_geotrees_als.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %*
 set "RC=%ERRORLEVEL%"
 
+REM 3 = outra copia ainda segura a trava. Fecha esta janela sem pause.
+if "%RC%"=="3" exit /b 3
+
 echo.
 if not "%RC%"=="0" (
     echo [ERRO] O script terminou com codigo %RC%.
