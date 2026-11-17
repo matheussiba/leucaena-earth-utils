@@ -35,10 +35,15 @@ A spatial cobertura GeoPackage is also kept in the output folder
 (``rgbnir_cobertura.gpkg``), with the same articulation schema used by
 ``transferir_laz_rgb_ir_v3_por_aoi.py``. The first run that finds no GPKG
 bootstraps every finished TIFF already in ``G:\\RGBNIR``; afterwards each
-new successful write appends one feature. Updates are always written to a
-temporary file and renamed into place so a crash does not leave a half-written
-GPKG. Articulation polygons come from
-``data/msb-phd-leucaena-sp.gpkg`` in this repository.
+new successful write appends one feature. New attribute columns
+(``cenario``, ``tipo_juncao``, ``alinhamento``, ...) are added once when an
+older GPKG is loaded; later runs only append rows. Updates are always
+written to a temporary file and renamed into place so a crash does not
+leave a half-written GPKG. Articulation polygons come from
+``C:\\Users\\admin\\Documents\\Projetos_Matheus_Barros\\msb-phd-leucaena-sp.gpkg``.
+
+Queue order: pending pairs with matching RGB/IR grids (direct NIR copy)
+run first; pairs that need ``-resampled`` run only after those finish.
 
 A pair is the same filename in both folders (case-insensitive). If the
 names differ only by the usual IGC wrappers (``ORTM_RGB_`` / ``ORTM_IR_``,
@@ -103,7 +108,9 @@ DEFAULT_IR_DIR = r"F:\IR"
 DEFAULT_OUT_DIR = r"G:\RGBNIR"
 _DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 DEFAULT_SP_BOUNDS = str(_DATA_DIR / "sp-bounds.gpkg")
-DEFAULT_ARTICULACAO = str(_DATA_DIR / "msb-phd-leucaena-sp.gpkg")
+DEFAULT_ARTICULACAO = (
+    r"C:\Users\admin\Documents\Projetos_Matheus_Barros\msb-phd-leucaena-sp.gpkg"
+)
 DEFAULT_ARTIC_LAYER = "articulacao-igc-merged-spatialindex-sirgas2000"
 
 # False reuses rgbnir_sp_vistoria.csv and does not reopen TIFF headers.
@@ -124,7 +131,7 @@ COBERTURA_LAYER = "cobertura"
 
 COMPRESS = "DEFLATE"
 BLOCK = 512
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 # Same id columns as transferir_laz_rgb_ir_v3_por_aoi.py
 _ID_COLUMN_BY_LAYER = {
@@ -141,8 +148,18 @@ _COBERTURA_KEEP_COLS = (
     "has_rgbnir",
     "saida_nome",
     "tile_key",
+    "cenario",
+    "modo_pareamento",
+    "tipo_registro",
+    "status",
+    "tipo_juncao",
+    "alinhamento",
     "geometry",
 )
+# tipo_juncao / alinhamento vocabulary written into the cobertura GPKG.
+_TIPO_JUNCAO_DIRETOS = "direto"
+_TIPO_JUNCAO_RESAMPLED = "resampled"
+_ALINHAMENTO_NA = "nao_aplicavel"
 
 # Do not let GDAL drop .aux.xml sidecars beside the source tiles on E: and F:.
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
@@ -1422,11 +1439,32 @@ class RgbnirCobertura:
                 return self._artic.loc[idx]
         return None
 
-    def _feature_from_saida(self, saida_path: Path, tile_key: str = "") -> dict | None:
+    def _attrs_from_registry(self, meta: dict[str, str] | None, saida_nome: str) -> dict:
+        meta = meta or {}
+        alinhamento = infer_alinhamento_from_saida(saida_nome, meta.get("detalhe") or "")
+        tipo_juncao = tipo_juncao_for_row(meta, alinhamento=alinhamento) if meta else (
+            _TIPO_JUNCAO_RESAMPLED if alinhamento == _TIPO_JUNCAO_RESAMPLED else _TIPO_JUNCAO_DIRETOS
+        )
+        return {
+            "cenario": meta.get("cenario") or "",
+            "modo_pareamento": meta.get("modo_pareamento") or "",
+            "tipo_registro": meta.get("tipo_registro") or ("par" if saida_nome else ""),
+            "status": meta.get("status") or ("ok" if saida_nome else ""),
+            "tipo_juncao": tipo_juncao,
+            "alinhamento": alinhamento if saida_nome else _ALINHAMENTO_NA,
+        }
+
+    def _feature_from_saida(
+        self,
+        saida_path: Path,
+        tile_key: str = "",
+        meta: dict[str, str] | None = None,
+    ) -> dict | None:
         if not saida_path.is_file() or saida_path.stat().st_size <= 0:
             return None
         saida_nome = saida_path.name
-        row = self._lookup_artic_row(saida_nome, tile_key)
+        attrs = self._attrs_from_registry(meta, saida_nome)
+        row = self._lookup_artic_row(saida_nome, tile_key or (meta or {}).get("tile_key") or "")
         if row is not None:
             return {
                 "layer": row.get("layer"),
@@ -1435,7 +1473,10 @@ class RgbnirCobertura:
                 "NOMENC_10K": row.get("NOMENC_10K"),
                 "has_rgbnir": 1,
                 "saida_nome": saida_nome,
-                "tile_key": tile_key or tile_id_candidates_from_saida(saida_nome)[0],
+                "tile_key": tile_key
+                or (meta or {}).get("tile_key")
+                or tile_id_candidates_from_saida(saida_nome)[0],
+                **attrs,
                 "geometry": row.geometry,
             }
         geom, _crs = _raster_bounds_polygon(saida_path)
@@ -1449,9 +1490,29 @@ class RgbnirCobertura:
             "NOMENC_10K": None,
             "has_rgbnir": 1,
             "saida_nome": saida_nome,
-            "tile_key": tile_key or tile_id_candidates_from_saida(saida_nome)[0],
+            "tile_key": tile_key
+            or (meta or {}).get("tile_key")
+            or tile_id_candidates_from_saida(saida_nome)[0],
+            **attrs,
             "geometry": geom,
         }
+
+    def _ensure_schema_columns(self) -> bool:
+        """Add missing cobertura columns once; caller must save if this returns True."""
+        if self._gdf is None:
+            self._gdf = self._empty_frame()
+            return True
+        changed = False
+        for col in _COBERTURA_KEEP_COLS:
+            if col == "geometry":
+                continue
+            if col not in self._gdf.columns:
+                if col == "has_rgbnir":
+                    self._gdf[col] = 1
+                else:
+                    self._gdf[col] = None
+                changed = True
+        return changed
 
     def _save_atomic(self) -> bool:
         if self._gdf is None:
@@ -1499,22 +1560,53 @@ class RgbnirCobertura:
                     existing = existing.set_crs(epsg=4674)
                 elif existing.crs.to_epsg() != 4674:
                     existing = existing.to_crs(epsg=4674)
-                if "saida_nome" not in existing.columns:
-                    existing["saida_nome"] = ""
-                if "has_rgbnir" not in existing.columns:
-                    existing["has_rgbnir"] = 1
-                if "tile_key" not in existing.columns:
-                    existing["tile_key"] = ""
                 for col in _COBERTURA_KEEP_COLS:
-                    if col not in existing.columns and col != "geometry":
-                        existing[col] = None
-                self._gdf = existing[[c for c in _COBERTURA_KEEP_COLS if c in existing.columns]].copy()
+                    if col == "geometry":
+                        continue
+                    if col not in existing.columns:
+                        existing[col] = 1 if col == "has_rgbnir" else None
+                keep = [c for c in _COBERTURA_KEEP_COLS if c in existing.columns]
+                self._gdf = existing[keep].copy()
                 self._known = {
                     str(name).casefold()
                     for name in self._gdf["saida_nome"].fillna("").astype(str)
                     if str(name).strip()
                 }
-                log(f"Cobertura existente: {len(self._gdf)} feicao(oes) em {self.path}")
+                migrated = self._ensure_schema_columns()
+                # Fill new join fields for rows that already exist (once).
+                filled = 0
+                if "tipo_juncao" in self._gdf.columns:
+                    for idx, feat in self._gdf.iterrows():
+                        nome = str(feat.get("saida_nome") or "")
+                        if not nome or nome.lower() == "nan":
+                            continue
+                        current = feat.get("tipo_juncao")
+                        if current is not None and str(current).strip() and str(current).lower() != "nan":
+                            continue
+                        alinhamento = infer_alinhamento_from_saida(nome)
+                        self._gdf.at[idx, "alinhamento"] = alinhamento
+                        self._gdf.at[idx, "tipo_juncao"] = (
+                            _TIPO_JUNCAO_RESAMPLED
+                            if alinhamento == _TIPO_JUNCAO_RESAMPLED
+                            else _TIPO_JUNCAO_DIRETOS
+                        )
+                        st = feat.get("status")
+                        if st is None or str(st).strip() in {"", "nan"}:
+                            self._gdf.at[idx, "status"] = "pulado_ja_existe"
+                        tr = feat.get("tipo_registro")
+                        if tr is None or str(tr).strip() in {"", "nan"}:
+                            self._gdf.at[idx, "tipo_registro"] = "par"
+                        filled += 1
+                if migrated or filled:
+                    if self._save_atomic():
+                        log(
+                            f"Cobertura existente atualizada uma vez "
+                            f"(colunas novas / {filled} feicoes com tipo_juncao): {self.path}"
+                        )
+                    else:
+                        log("AVISO: nao gravei a migracao da cobertura; tentarei de novo depois.")
+                else:
+                    log(f"Cobertura existente: {len(self._gdf)} feicao(oes) em {self.path}")
                 return
             except Exception as exc:  # noqa: BLE001
                 log(
@@ -1552,7 +1644,59 @@ class RgbnirCobertura:
         else:
             log("AVISO: bootstrap da cobertura falhou na gravacao. Continuarei tentando tile a tile.")
 
-    def add_saida(self, saida_path: Path | str, tile_key: str = "") -> bool:
+    def sync_missing_from_rows(self, rows: list[dict[str, str]], out_dir: Path) -> int:
+        """Append finished pairs that are on disk but still missing from the GPKG (one save)."""
+        if not self.enabled:
+            return 0
+        self._ensure_schema_columns()
+        added = 0
+        pending_feats: list[dict] = []
+        for row in rows:
+            if row.get("tipo_registro") != "par":
+                continue
+            if row.get("status") not in {"ok", "pulado_ja_existe"}:
+                continue
+            nome = (row.get("saida_nome") or "").strip()
+            if not nome or nome.casefold() in self._known:
+                continue
+            caminho = (row.get("saida_caminho") or "").strip()
+            path = Path(caminho) if caminho else (out_dir / nome)
+            if not path.is_file():
+                found = finished_output(out_dir, nome)
+                if found is None:
+                    continue
+                path = found
+            feat = self._feature_from_saida(path, tile_key=row.get("tile_key") or "", meta=row)
+            if feat is None:
+                continue
+            pending_feats.append(feat)
+            self._known.add(path.name.casefold())
+            added += 1
+        if not pending_feats:
+            return 0
+        import pandas as pd
+
+        target_crs = self._gdf.crs if self._gdf is not None else "EPSG:4674"
+        novo = self._gpd.GeoDataFrame(pending_feats, geometry="geometry", crs="EPSG:4674")
+        if target_crs is not None and novo.crs != target_crs:
+            novo = novo.to_crs(target_crs)
+        if self._gdf is None or not len(self._gdf):
+            self._gdf = novo
+        else:
+            juntos = pd.concat([self._gdf, novo], ignore_index=True)
+            self._gdf = self._gpd.GeoDataFrame(juntos, geometry="geometry", crs=target_crs)
+        if self._save_atomic():
+            log(f"Cobertura: acrescentei {added} feicao(oes) que ja estavam em disco e faltavam no GPKG.")
+            return added
+        log("AVISO: falha ao gravar o sync da cobertura.")
+        return 0
+
+    def add_saida(
+        self,
+        saida_path: Path | str,
+        tile_key: str = "",
+        meta: dict[str, str] | None = None,
+    ) -> bool:
         """Append one finished output. No-op if already present. Atomic rewrite."""
         if not self.enabled:
             return False
@@ -1562,7 +1706,9 @@ class RgbnirCobertura:
             return False
         if self._gdf is None:
             self._gdf = self._empty_frame()
-        feat = self._feature_from_saida(path, tile_key=tile_key)
+        else:
+            self._ensure_schema_columns()
+        feat = self._feature_from_saida(path, tile_key=tile_key, meta=meta)
         if feat is None:
             return False
         import pandas as pd
@@ -1594,7 +1740,7 @@ class RgbnirCobertura:
             if found is None:
                 return False
             path = found
-        return self.add_saida(path, tile_key=row.get("tile_key") or "")
+        return self.add_saida(path, tile_key=row.get("tile_key") or "", meta=row)
 
 
 # -----------------------------------------------------------------------------
@@ -1942,6 +2088,114 @@ def verify_existing_geotiff(path: Path, nir_band: int) -> tuple[bool, str]:
 
 def _approx_equal_transform(left, right, tol: float = 1e-6) -> bool:
     return all(abs(a - b) <= tol for a, b in zip(tuple(left)[:6], tuple(right)[:6]))
+
+
+def probe_alinhamento(rgb_path: str, ir_path: str) -> str:
+    """Header-only check: ``direto``, ``resampled`` or ``desconhecido``.
+
+    Same rule as ``fuse_one`` (shape + CRS + transform), without writing anything.
+    """
+    if rasterio is None:
+        return "desconhecido"
+    try:
+        with rasterio.open(rgb_path) as rgb_src, rasterio.open(ir_path) as ir_src:
+            if rgb_src.crs is None or ir_src.crs is None:
+                return "desconhecido"
+            same_shape = (rgb_src.width, rgb_src.height) == (ir_src.width, ir_src.height)
+            same_grid = (
+                same_shape
+                and rgb_src.crs == ir_src.crs
+                and _approx_equal_transform(rgb_src.transform, ir_src.transform)
+            )
+            return _TIPO_JUNCAO_DIRETOS if same_grid else _TIPO_JUNCAO_RESAMPLED
+    except Exception:  # noqa: BLE001
+        return "desconhecido"
+
+
+def infer_alinhamento_from_saida(saida_nome: str, detalhe: str = "") -> str:
+    name = (saida_nome or "").casefold()
+    note = (detalhe or "").casefold()
+    if "resampled" in name:
+        return _TIPO_JUNCAO_RESAMPLED
+    if "alinhado na grade" in note or "nearest neighbor" in note:
+        return _TIPO_JUNCAO_RESAMPLED
+    if "ja coincidia" in note or "sem reamostrar" in note:
+        return _TIPO_JUNCAO_DIRETOS
+    if saida_nome:
+        return _TIPO_JUNCAO_DIRETOS
+    return _ALINHAMENTO_NA
+
+
+def tipo_juncao_for_row(row: dict[str, str], *, alinhamento: str | None = None) -> str:
+    """Single cobertura label covering pairing outcome + alignment + errors."""
+    status = (row.get("status") or "").strip()
+    tipo = (row.get("tipo_registro") or "").strip()
+    if status == "fora_de_sp" or tipo == "fora_de_sp":
+        return "fora_de_sp"
+    if status == "sem_localizacao" or tipo == "sem_localizacao":
+        return "sem_localizacao"
+    if tipo == "rgb_sem_ir":
+        return "rgb_sem_ir"
+    if tipo == "ir_sem_rgb":
+        return "ir_sem_rgb"
+    if tipo == "anomalia" or status == "anomalia":
+        return "anomalia"
+    if tipo == "duplicata_ignorada" or status == "duplicata_ignorada":
+        return "duplicata_ignorada"
+    if tipo == "conflito_saida" or status == "conflito_saida":
+        return "conflito_saida"
+    if status == "falha":
+        return "falha"
+    if status == "interrompido":
+        return "interrompido"
+    if tipo == "par" or row.get("cenario") in {"1", "2", "3", "4"}:
+        align = alinhamento or infer_alinhamento_from_saida(
+            row.get("saida_nome") or "", row.get("detalhe") or ""
+        )
+        if align == _TIPO_JUNCAO_RESAMPLED:
+            return _TIPO_JUNCAO_RESAMPLED
+        if align == _TIPO_JUNCAO_DIRETOS:
+            return _TIPO_JUNCAO_DIRETOS
+        return "par_pendente"
+    if row.get("cenario") == "5":
+        return "sem_par"
+    return status or tipo or "desconhecido"
+
+
+def prioritize_queue_direto_then_resampled(queue: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Process same-grid pairs first; only then pairs that need NIR resampling."""
+    if not queue:
+        return queue
+    log("Classificando a fila: copia direta (mesma grade) primeiro; resampled depois...")
+    direto: list[dict[str, str]] = []
+    resampled: list[dict[str, str]] = []
+    desconhecido: list[dict[str, str]] = []
+    started = time.time()
+    for index, row in enumerate(queue, 1):
+        align = probe_alinhamento(row.get("rgb_caminho") or "", row.get("ir_caminho") or "")
+        row["_fila_alinhamento"] = align
+        if align == _TIPO_JUNCAO_DIRETOS:
+            direto.append(row)
+        elif align == _TIPO_JUNCAO_RESAMPLED:
+            resampled.append(row)
+        else:
+            desconhecido.append(row)
+        if index % 500 == 0 or index == len(queue):
+            log(
+                f"  ... vistoria de grade {index}/{len(queue)} "
+                f"(direto={len(direto)} resampled={len(resampled)} "
+                f"desconhecido={len(desconhecido)}) "
+                f"em {fmt_duration(time.time() - started)}"
+            )
+    ordered = direto + desconhecido + resampled
+    log("=" * 78)
+    log("ORDEM DA FILA NESTA EXECUCAO")
+    log(f"  1) Copia direta (mesma grade RGB/IR):     {len(direto)}")
+    log(f"  2) Grade ainda nao classificada:          {len(desconhecido)}")
+    log(f"  3) Precisa resampled (grades diferentes): {len(resampled)}")
+    log("  Os ja gravados em disco continuam pulados; so estes da fila serao escritos.")
+    log("=" * 78)
+    return ordered
 
 
 def _align_nir_to_rgb_window(ir_src, nir_band: int, window, rgb_transform, rgb_crs, src_nodata, dst_nodata):
@@ -2449,28 +2703,78 @@ def _assign_resume_status(
     return skipped, queue
 
 
-def _print_scenario_audit(rows: list[dict[str, str]]) -> None:
-    """Counts come from the rows themselves. Nothing here is a fixed quantity."""
+def _print_scenario_audit(
+    rows: list[dict[str, str]],
+    *,
+    rgb_all_count: int | None = None,
+    ir_all_count: int | None = None,
+    skipped: list[dict[str, str]] | None = None,
+    queue: list[dict[str, str]] | None = None,
+) -> None:
+    """Startup inventory: ~9k origin files vs ~8.8k pairs the script will fuse."""
     pairs = [row for row in rows if row.get("tipo_registro") == "par"]
+
     def ncen(number: str) -> int:
         return sum(1 for row in pairs if row.get("cenario") == number)
 
     rgb_sem = sum(1 for row in rows if row.get("tipo_registro") == "rgb_sem_ir")
     ir_sem = sum(1 for row in rows if row.get("tipo_registro") == "ir_sem_rgb")
-    anomalias = sum(1 for row in rows if row.get("status") == "anomalia")
-    log("Auditoria dos cenarios (contada nesta execucao):")
-    log(f"  Cenario 1 puro+puro:            {ncen('1')}")
-    log(f"  Cenario 2 mesma familia:        {ncen('2')}")
-    log(f"  Cenario 3 puro com familia:     {ncen('3')}")
-    log(f"  Cenario 4 familias diferentes:  {ncen('4')}")
-    log(f"  Cenario 5 sem tif:              {sum(1 for row in rows if row.get('cenario') == '5')}")
-    log(f"  {rgb_sem} arquivos RGB sem IR")
-    log(f"  {ir_sem} arquivos IR sem RGB")
-    log(f"  {anomalias} anomalias (tipo repetido ou nome sem id)")
+    anomalias = sum(1 for row in rows if row.get("status") == "anomalia" or row.get("tipo_registro") == "anomalia")
     fora = sum(1 for row in rows if row.get("status") == "fora_de_sp")
     sem_loc = sum(1 for row in rows if row.get("status") == "sem_localizacao")
-    log(f"  {fora} arquivos fora de Sao Paulo (ignorados)")
-    log(f"  {sem_loc} arquivos sem localizacao (ignorados)")
+    conflitos = sum(1 for row in rows if row.get("status") == "conflito_saida")
+    duplicatas = sum(1 for row in rows if row.get("tipo_registro") == "duplicata_ignorada")
+    cen5 = sum(1 for row in rows if row.get("cenario") == "5")
+    n_rgb = rgb_all_count if rgb_all_count is not None else sum(1 for row in rows if row.get("rgb_caminho"))
+    n_ir = ir_all_count if ir_all_count is not None else sum(1 for row in rows if row.get("ir_caminho"))
+    done = len(skipped or [])
+    pending = len(queue or [])
+    ready = sum(1 for row in pairs if row.get("status") in {"ok", "pulado_ja_existe"})
+    if skipped is not None:
+        ready = done
+
+    log("=" * 78)
+    log("INVENTARIO (leia com calma: entrada ~9k por pasta != saida ~8.8k pares)")
+    log("=" * 78)
+    log(f"  Arquivos RGB encontrados na origem:  {n_rgb}")
+    log(f"  Arquivos IR  encontrados na origem:  {n_ir}")
+    log(f"  Soma bruta RGB+IR (dois lados):      {n_rgb + n_ir}")
+    log("  Isso NAO e a meta de GeoTIFF. Um arquivo de origem nao vira um RGBNIR.")
+    log("-" * 78)
+    log(f"  Pares que GERAM GeoTIFF (cenarios 1-4): {len(pairs)}")
+    log(f"    cenario 1 RAW+RAW:                 {ncen('1')}")
+    log(f"    cenario 2 mesma familia/versao:    {ncen('2')}")
+    log(f"    cenario 3 RAW x familia:           {ncen('3')}")
+    log(f"    cenario 4 familias diferentes:     {ncen('4')}")
+    log(f"  Conferencia 1+2+3+4:                 {ncen('1') + ncen('2') + ncen('3') + ncen('4')}")
+    log("-" * 78)
+    log("  Linhas que NAO geram GeoTIFF:")
+    log(f"    cenario 5 (sem tif, agregado):     {cen5}")
+    log(f"    RGB sem IR:                        {rgb_sem}")
+    log(f"    IR sem RGB:                        {ir_sem}")
+    log(f"    anomalias:                         {anomalias}")
+    log(f"    fora de Sao Paulo:                 {fora}")
+    log(f"    sem localizacao (sem CRS/bounds):  {sem_loc}")
+    log(f"    conflitos de nome de saida:        {conflitos}")
+    log(f"    duplicatas ignoradas:              {duplicatas}")
+    log(
+        f"  Conferencia residual sem tif:        "
+        f"{rgb_sem + ir_sem + anomalias} "
+        f"(rgb_sem_ir + ir_sem_rgb + anomalias; deve bater com cenario 5 se so esses)"
+    )
+    log(f"  Linhas totais no registro:           {len(rows)}")
+    log(
+        f"  Conferencia registro:                "
+        f"{len(pairs) + rgb_sem + ir_sem + anomalias + fora + sem_loc + conflitos + duplicatas} "
+        f"(pares + residual + filtros)"
+    )
+    log("-" * 78)
+    log(f"  META DE PRODUCAO DESTE SCRIPT:       {len(pairs)} GeoTIFF RGBNIR")
+    log(f"  Ja prontos em disco (serao pulados): {ready}")
+    if queue is not None:
+        log(f"  Ainda na fila desta execucao:        {pending}")
+        log("  Ordem da fila: primeiro copia direta (mesma grade); so depois resampled.")
+    log("=" * 78)
 
 
 def _print_pair_plan(pairs: list[dict[str, str]], queue: list[dict[str, str]], skipped: list[dict[str, str]]) -> None:
@@ -2481,6 +2785,11 @@ def _print_pair_plan(pairs: list[dict[str, str]], queue: list[dict[str, str]], s
     if total:
         proximo = done + 1 if queue else total
         log(f"Andamento geral: {done}/{total} ja processados. O proximo entra como {proximo}/{total}.")
+    n_dir = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_DIRETOS)
+    n_res = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_RESAMPLED)
+    n_unk = sum(1 for row in queue if row.get("_fila_alinhamento") == "desconhecido")
+    if queue:
+        log(f"  Na fila agora -> direto={n_dir} | desconhecido={n_unk} | resampled={n_res}")
     preview = skipped[:15]
     for row in preview:
         log(f"  PULA  {row['saida_nome']}  <=  RGB {row['rgb_nome']}  +  IR {row['ir_nome']}")
@@ -2489,7 +2798,11 @@ def _print_pair_plan(pairs: list[dict[str, str]], queue: list[dict[str, str]], s
     preview_queue = queue[:40]
     for offset, row in enumerate(preview_queue, 1):
         pos = done + offset
-        log(f"  FILA  [{pos}/{total}] {row['saida_nome']}  <=  RGB {row['rgb_nome']}  +  IR {row['ir_nome']}")
+        tag = row.get("_fila_alinhamento") or "?"
+        log(
+            f"  FILA  [{pos}/{total}] ({tag}) {row['saida_nome']}  <=  "
+            f"RGB {row['rgb_nome']}  +  IR {row['ir_nome']}"
+        )
     if len(queue) > len(preview_queue):
         log(f"  ... e mais {len(queue) - len(preview_queue)} na fila. Cada um sera impresso de novo quando comecar.")
 
@@ -2855,8 +3168,21 @@ def main(argv: list[str] | None = None) -> int:
         for row in all_rows:
             row["notas"] = compose_note(row, out_dir)
 
+        # Resume-safe: never rewrite finished GeoTIFFs; only fill missing GPKG rows/attrs once.
+        if cobertura is not None:
+            cobertura.sync_missing_from_rows(skipped + [r for r in pairing.pairs if r.get("status") == "ok"], out_dir)
+
+        if queue and not args.dry_run:
+            queue = prioritize_queue_direto_then_resampled(queue)
+
+        _print_scenario_audit(
+            all_rows,
+            rgb_all_count=len(rgb_all),
+            ir_all_count=len(ir_all),
+            skipped=skipped,
+            queue=queue,
+        )
         _print_pair_plan(pairing.pairs, queue, skipped)
-        _print_scenario_audit(all_rows)
         _print_leftovers(all_rows)
         publish(all_rows, out_dir=out_dir, rgb_dir=rgb_dir, ir_dir=ir_dir, run_id=run_id)
         log("CSV inicial gravado, antes de comecar a fundir. Da para abrir o resumo enquanto roda (melhor copiar o arquivo).")
@@ -2877,10 +3203,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         proximo = len(skipped) + 1
+        n_dir = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_DIRETOS)
+        n_res = sum(1 for row in queue if row.get("_fila_alinhamento") == _TIPO_JUNCAO_RESAMPLED)
         log(
-            f"Comecando a gravar {len(queue)} tile(s). "
+            f"Comecando a gravar {len(queue)} tile(s) "
+            f"(direto={n_dir}, resampled/outros={len(queue) - n_dir}; resampled na fila={n_res}). "
             f"Contador: {proximo}/{len(pairing.pairs)} "
-            f"({len(skipped)} ja estavam em disco)."
+            f"({len(skipped)} ja estavam em disco e NAO serao refeitos)."
         )
         outcome = _run_queue(
             queue,
