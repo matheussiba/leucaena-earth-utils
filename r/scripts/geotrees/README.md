@@ -2,7 +2,7 @@
 
 Runs the official GeoTrees ALS pipeline one `.laz` or `.las` tile at a time, writes a registry, and skips tiles that already finished.
 
-`ALS_processing.R` and `ALS_processing_helperfunctions.R` are not in this repository. Before the first run, copy `ALS_processing_helperfunctions.R` into this folder, next to `batch_geotrees_als.R`. The batch script loads that file. `ALS_processing.R` is not used.
+`batch_geotrees_als.R` loads `ALS_processing_helperfunctions.R` from this folder. `ALS_processing.R` is not used and is not in this repository.
 
 The articulation layer is read-only:
 
