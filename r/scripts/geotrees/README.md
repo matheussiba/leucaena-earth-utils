@@ -10,7 +10,7 @@ The articulation layer is read-only:
 
 ## Run the batch file
 
-This is the lab launcher. Edit the variables at the top of `batch_geotrees_als.bat`:
+The tracked file is `batch_geotrees_als-sample.bat`. Copy it to `batch_geotrees_als.bat` in this folder and edit that copy. The copy is not stored in git.
 
 | Variable | Default | Meaning |
 |:---------|:--------|:--------|

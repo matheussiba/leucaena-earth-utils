@@ -25,6 +25,9 @@ renv/staging/
 # Official single-file runner. The batch script does not use it.
 r/scripts/geotrees/ALS_processing.R
 
+# Local GeoTrees launcher. Copy batch_geotrees_als-sample.bat to this name.
+r/scripts/geotrees/batch_geotrees_als.bat
+
 # Quarto
 _quarto/
 *_files/
