@@ -16,4 +16,4 @@ Requires `install.packages(c("geobr", "sf"))`.
 
 `geotrees/batch_geotrees_als.bat` and `geotrees/batch_geotrees_als.R` walk a LAZ folder tile by tile. How to run them: [`geotrees/README.md`](geotrees/README.md).
 
-The official `ALS_processing.R` and `ALS_processing_helperfunctions.R` are not stored in this repository. Copy `ALS_processing_helperfunctions.R` into `geotrees/` before running.
+`geotrees/ALS_processing_helperfunctions.R` is the pipeline the batch script loads. `ALS_processing.R` is not used and is not in this repository.
