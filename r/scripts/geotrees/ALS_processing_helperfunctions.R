@@ -5958,16 +5958,20 @@ process.dataset = function(name_job, type_file, dir_dataset, dir_processed, tmpd
         )
         
         if (is.null(status)) status = "error"
-        information_processing[i, status := as.character(status)]
+        txt_status = as.character(status)
+        information_processing[i, status := txt_status]
       } 
       
       time_end = Sys.time()
       time_processing = difftime(time_end,time_start,units = "mins")
       
       # append to the general output files
-      information_processing[i, time_start := as.character(format(time_start,"%d/%m/%Y %Hh%M"))]
-      information_processing[i, time_end := as.character(format(time_end,"%d/%m/%Y %Hh%M"))]
-      information_processing[i, time_processing_minutes := as.character(round(as.numeric(time_processing)))]
+      txt_start = as.character(format(time_start,"%d/%m/%Y %Hh%M"))
+      txt_end = as.character(format(time_end,"%d/%m/%Y %Hh%M"))
+      txt_minutes = as.character(round(as.numeric(time_processing)))
+      information_processing[i, time_start := txt_start]
+      information_processing[i, time_end := txt_end]
+      information_processing[i, time_processing_minutes := txt_minutes]
       
       # v.1.0.0 remove default printing of job summary. Since jobs can be run at different levels, this might be confusing. Summary information is included for each geo-unit anyways
       if(print.summary_job == T){

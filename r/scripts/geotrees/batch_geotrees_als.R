@@ -1475,13 +1475,15 @@ run_one <- function(src, opt, paths, inbox, metadata) {
   pasta <- if (dir.exists(out_tile)) normalizePath(out_tile, winslash = "/") else out_tile
   if (inherits(status, "error")) {
     erro <- clip_err(conditionMessage(status), 1200)
+    check <- tile_success(out_tile)
+    if (!check$ok && nzchar(check$erro)) erro <- paste0(erro, " | ", check$erro)
     if (nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
     if (nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
     return(list(ok = FALSE, erro = erro, minutos = minutos, pasta_saida = pasta))
   }
   check <- tile_success(out_tile)
   erro <- check$erro
-  if (!check$ok && nzchar(detalhe)) erro <- detalhe
+  if (!check$ok && nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
   if (!check$ok && nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
   list(ok = check$ok, erro = erro, minutos = minutos, pasta_saida = pasta)
 }
