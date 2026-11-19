@@ -2,9 +2,12 @@
 #
 # Envolve ALS_processing_helperfunctions_v.1.0.4.R / process.dataset com
 # path_lastools preenchido. Para cada .laz/.las:
-#   1. pula se OUT_DIR/processed/<tile> ja tem _INFO_summary_processing.csv
-#   2. senao roda o GeoTrees so naquele arquivo via LAStools
+#   1. pula se OUT_DIR/processed/<utm>/<tile> ja tem _INFO_summary_processing.csv
+#      (utm = 22 para EPSG 32722, 23 para 32723)
+#   2. senao roda o GeoTrees so naquele arquivo via LAStools (staging em tmp;
+#      so promove para processed/<utm>/<tile> quando terminar ok)
 #   3. grava o tile no CSV, no historico e no GPKG de registro
+#   4. problemas da rodada em geotrees_als_problemas.txt
 #
 # Limite de tempo: --max-hours (padrao 24). A checagem e entre tiles.
 # Parar no meio: PARAR.txt em OUT_DIR.
@@ -15,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.2.0-lastools"
+VERSION <- "1.3.0-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -459,6 +462,7 @@ out_paths <- function(out_dir) {
     logs = file.path(out_dir, "logs"),
     registry = file.path(out_dir, "geotrees_als_registry.csv"),
     historico = file.path(out_dir, "geotrees_als_historico.csv"),
+    problemas = file.path(out_dir, "geotrees_als_problemas.txt"),
     gpkg = file.path(out_dir, "geotrees_als_registro.gpkg"),
     md = file.path(out_dir, "geotrees_als_relatorio.md"),
     plano = file.path(out_dir, "geotrees_als_plano.md"),
@@ -472,6 +476,20 @@ out_paths <- function(out_dir) {
     artic_index_meta = file.path(out_dir, "geotrees_als_artic_indice_meta.csv"),
     parar = file.path(out_dir, "PARAR.txt")
   )
+}
+
+utm_zone_folder <- function(epsg) {
+  e <- suppressWarnings(as.integer(epsg)[[1]])
+  if (length(e) != 1L || is.na(e)) return("outros")
+  if (e %in% c(32722L, 31982L)) return("22")
+  if (e %in% c(32723L, 31983L)) return("23")
+  if (e >= 32701L && e <= 32760L) return(sprintf("%02d", e - 32700L))
+  if (e >= 32601L && e <= 32660L) return(sprintf("%02d", e - 32600L))
+  as.character(e)
+}
+
+is_utm_zone_dirname <- function(name) {
+  grepl("^[0-9]{2}$", name) || identical(name, "outros")
 }
 
 drive_of <- function(path) {
@@ -637,12 +655,22 @@ save_registry <- function(path, dt) {
   invisible(dt)
 }
 
+sanitize_csv_text <- function(x) {
+  x <- as.character(x)
+  if (length(x) != 1L) x <- paste(x, collapse = " ")
+  if (is.na(x)) x <- ""
+  x <- gsub("[\r\n\t]+", " ", x)
+  x <- gsub(",", ";", x, fixed = TRUE)
+  trimws(x)
+}
+
 append_historico <- function(path, row) {
   dt <- data.table::as.data.table(row)
   for (col in HIST_COLS) if (!col %in% names(dt)) dt[, (col) := NA]
+  if ("erro" %in% names(dt)) dt[, erro := sanitize_csv_text(erro)]
   dt <- dt[, ..HIST_COLS]
   novo <- !file.exists(path)
-  data.table::fwrite(dt, path, append = !novo, bom = novo, na = "")
+  data.table::fwrite(dt, path, append = !novo, bom = novo, na = "", quote = TRUE)
 }
 
 load_historico <- function(path) {
@@ -650,17 +678,67 @@ load_historico <- function(path) {
     vazio <- stats::setNames(replicate(length(HIST_COLS), character(0), simplify = FALSE), HIST_COLS)
     return(data.table::as.data.table(vazio))
   }
-  data.table::fread(path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE)
+  data.table::fread(
+    path,
+    colClasses = "character",
+    encoding = "UTF-8",
+    showProgress = FALSE,
+    fill = TRUE,
+    quote = "\""
+  )
+}
+
+append_problema <- function(path, tile_id, erro, host = maquina()) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  line <- sprintf(
+    "%s | host=%s | tile=%s | %s\n",
+    format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+    host,
+    as.character(tile_id),
+    sanitize_csv_text(erro)
+  )
+  cat(line, file = path, append = TRUE)
+  invisible(path)
+}
+
+list_tile_dirs <- function(dir_processed) {
+  if (!dir.exists(dir_processed)) return(character())
+  top <- list.dirs(dir_processed, recursive = FALSE, full.names = TRUE)
+  out <- character()
+  for (p in top) {
+    nm <- basename(p)
+    if (is_utm_zone_dirname(nm)) {
+      kids <- list.dirs(p, recursive = FALSE, full.names = TRUE)
+      out <- c(out, kids)
+    } else {
+      out <- c(out, p)
+    }
+  }
+  out
+}
+
+prune_incomplete_processed <- function(dir_processed) {
+  tiles <- list_tile_dirs(dir_processed)
+  if (!length(tiles)) return(invisible(0L))
+  n_rm <- 0L
+  for (k in tiles) {
+    info <- list.files(k, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
+    if (length(info)) next
+    say("  removendo pasta incompleta: ", normalizePath(k, winslash = "/", mustWork = FALSE))
+    unlink(k, recursive = TRUE, force = TRUE)
+    n_rm <- n_rm + 1L
+  }
+  invisible(n_rm)
 }
 
 scan_done <- function(dir_processed, known_ids = character()) {
   vazio <- data.table::data.table(tile_id = character(), pasta_saida = character(), finalizado_utc = character())
-  say("Procurando tiles ja prontos em ", dir_processed)
+  say("Procurando tiles ja prontos em ", dir_processed, " (pastas 22/23 e legado)")
   if (!dir.exists(dir_processed)) {
     say("  A pasta de produtos ainda nao existe. Nenhum tile pronto.")
     return(vazio)
   }
-  kids <- list.dirs(dir_processed, recursive = FALSE, full.names = TRUE)
+  kids <- list_tile_dirs(dir_processed)
   if (!length(kids)) {
     say("  Nenhuma pasta de tile nesta saida.")
     return(vazio)
@@ -1326,7 +1404,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
     sprintf("**Filtro BLOCO:** %s  ", filtro),
     sprintf("**Saida:** `%s`  ", paths$root),
     sprintf("**GPKG do que ja foi:** `%s` (camada `%s`)  ", paths$gpkg, LAYER_OUT),
-    sprintf("**Produtos GeoTrees:** `%s/<tile>/`  ", paths$processed),
+    sprintf("**Produtos GeoTrees:** `%s/<utm22|23>/<tile>/`  ", paths$processed),
     ""
   )
   n_faltam <- faltam_na_rodada(plan, rodada)
@@ -1567,7 +1645,50 @@ wipe_dir_contents <- function(path) {
   if (length(old)) unlink(old, recursive = TRUE, force = TRUE)
 }
 
+kill_stray_lastools <- function() {
+  if (.Platform$OS.type != "windows") return(invisible())
+  exes <- c(
+    "lastile", "las2las", "lasduplicate", "lassort", "lasnoise", "lasground_new",
+    "lasheight", "lasgrid", "blast2dem", "lasthin", "lasboundary", "lasclip",
+    "las2txt", "lasinfo", "las2dem", "lascanopy", "lasoptimize", "lascopy",
+    "lasindex", "lasmerge", "lassplit", "lasvoxel"
+  )
+  for (e in exes) {
+    suppressWarnings(try(
+      system(sprintf("taskkill /F /IM %s.exe /T", e), intern = TRUE),
+      silent = TRUE
+    ))
+  }
+  invisible()
+}
+
+promote_tile_dir <- function(from_dir, to_dir) {
+  if (!dir.exists(from_dir)) return(FALSE)
+  parent <- dirname(to_dir)
+  dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+  if (dir.exists(to_dir)) unlink(to_dir, recursive = TRUE, force = TRUE)
+  ok <- suppressWarnings(file.rename(from_dir, to_dir))
+  if (isTRUE(ok) && dir.exists(to_dir)) return(TRUE)
+  dir.create(to_dir, recursive = TRUE, showWarnings = FALSE)
+  copied <- FALSE
+  tryCatch({
+    file.copy(from_dir, parent, recursive = TRUE, overwrite = TRUE)
+    staged_name <- file.path(parent, basename(from_dir))
+    if (!identical(normalizePath(staged_name, winslash = "/", mustWork = FALSE),
+                   normalizePath(to_dir, winslash = "/", mustWork = FALSE))) {
+      if (dir.exists(to_dir)) unlink(to_dir, recursive = TRUE, force = TRUE)
+      file.rename(staged_name, to_dir)
+    }
+    copied <- dir.exists(to_dir)
+  }, error = function(e) NULL)
+  unlink(from_dir, recursive = TRUE, force = TRUE)
+  isTRUE(copied)
+}
+
 tile_success <- function(out_tile) {
+  if (!nzchar(out_tile) || !dir.exists(out_tile)) {
+    return(list(ok = FALSE, erro = "pasta de saida ausente"))
+  }
   info <- list.files(out_tile, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
   err <- list.files(out_tile, pattern = "^_ERROR\\.txt$", recursive = TRUE, full.names = TRUE)
   if (length(err)) {
@@ -1608,29 +1729,39 @@ source_helper <- function(path) {
   say("Pipeline GeoTrees carregado.")
 }
 
-run_one <- function(src, opt, paths, inbox, metadata) {
+run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   ext <- tolower(tools::file_ext(src))
   type_file <- if (ext %in% c("laz", "las")) ext else "laz"
   dest <- link_into_inbox(src, inbox, type_file)
   stem <- tools::file_path_sans_ext(basename(dest))
-  out_tile <- file.path(paths$processed, stem)
+  zone <- utm_zone_folder(epsg_proc)
+  staging_root <- file.path(paths$root, "_staging")
+  out_staging <- file.path(staging_root, stem)
+  out_final <- file.path(paths$processed, zone, stem)
   dir.create(paths$processed, recursive = TRUE, showWarnings = FALSE)
   dir.create(paths$tmp, recursive = TRUE, showWarnings = FALSE)
   dir.create(paths$logs, recursive = TRUE, showWarnings = FALSE)
+  kill_stray_lastools()
   wipe_dir_contents(paths$tmp)
+  wipe_dir_contents(staging_root)
+  dir.create(staging_root, recursive = TRUE, showWarnings = FALSE)
   logfile <- file.path(paths$logs, paste0(toupper(stem), "_issues.csv"))
   if (file.exists(logfile)) unlink(logfile)
-  if (dir.exists(out_tile)) {
-    old_err <- list.files(out_tile, pattern = "^_ERROR\\.txt$", recursive = TRUE, full.names = TRUE)
-    if (length(old_err)) unlink(old_err)
-  }
+  # Limit BLAS threads so n_cores LAStools/R workers do not OOM on DSM steps.
+  Sys.setenv(
+    OPENBLAS_NUM_THREADS = "1",
+    OMP_NUM_THREADS = "1",
+    MKL_NUM_THREADS = "1",
+    VECLIB_MAXIMUM_THREADS = "1",
+    NUMEXPR_NUM_THREADS = "1"
+  )
   t0 <- Sys.time()
   status <- tryCatch(
     process.dataset(
       name_job = opt$name_job,
       type_file = type_file,
       dir_dataset = inbox,
-      dir_processed = paths$processed,
+      dir_processed = staging_root,
       tmpdir_processing = paths$tmp,
       path_lastools = opt$path_lastools,
       metadata = metadata,
@@ -1654,22 +1785,30 @@ run_one <- function(src, opt, paths, inbox, metadata) {
     error = function(e) e
   )
   minutos <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  kill_stray_lastools()
   unlink(dest)
   detalhe <- issue_text(logfile)
-  pasta <- if (dir.exists(out_tile)) normalizePath(out_tile, winslash = "/") else out_tile
-  if (inherits(status, "error")) {
-    erro <- clip_err(conditionMessage(status), 1200)
-    check <- tile_success(out_tile)
-    if (!check$ok && nzchar(check$erro)) erro <- paste0(erro, " | ", check$erro)
+  finish_fail <- function(erro) {
+    if (dir.exists(out_staging)) unlink(out_staging, recursive = TRUE, force = TRUE)
     if (nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
     if (nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
-    return(list(ok = FALSE, erro = erro, minutos = minutos, pasta_saida = pasta))
+    list(ok = FALSE, erro = clip_err(erro, 1200), minutos = minutos, pasta_saida = "")
   }
-  check <- tile_success(out_tile)
-  erro <- check$erro
-  if (!check$ok && nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
-  if (!check$ok && nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
-  list(ok = check$ok, erro = erro, minutos = minutos, pasta_saida = pasta)
+  if (inherits(status, "error")) {
+    erro <- clip_err(conditionMessage(status), 1200)
+    check <- tile_success(out_staging)
+    if (!check$ok && nzchar(check$erro)) erro <- paste0(erro, " | ", check$erro)
+    return(finish_fail(erro))
+  }
+  check <- tile_success(out_staging)
+  if (!check$ok) {
+    return(finish_fail(check$erro))
+  }
+  if (!promote_tile_dir(out_staging, out_final)) {
+    return(finish_fail(paste0("tile ok no staging mas falhou ao promover para processed/", zone)))
+  }
+  pasta <- normalizePath(out_final, winslash = "/")
+  list(ok = TRUE, erro = "", minutos = minutos, pasta_saida = pasta)
 }
 
 blank_meta <- function(plan_row) {
@@ -1880,6 +2019,11 @@ main <- function() {
   say("Registro: ", nrow(registry), " linha(s).")
   known_ids <- if (nrow(registry)) as.character(registry[status == "processed", tile_id]) else character()
   known_ids <- known_ids[!is.na(known_ids) & nzchar(known_ids)]
+  if (!opt$dry_run && !opt$report_only) {
+    say("Limpando pastas incompletas em processed/ (sem _INFO_summary_processing.csv)...")
+    n_prune <- prune_incomplete_processed(paths$processed)
+    if (n_prune > 0L) say("  removidas: ", n_prune)
+  }
   done <- scan_done(paths$processed, known_ids)
   if (!opt$dry_run) {
     say("Cruzando o registro com os tiles prontos e com a articulacao...")
@@ -2091,6 +2235,7 @@ main <- function() {
         minutos = NA_real_,
         pasta_saida = ""
       )
+      append_problema(paths$problemas, meta$tile_id, result$erro)
       status <- "erro"
       iniciado <- utc_now()
       row <- list(
@@ -2208,13 +2353,14 @@ main <- function() {
     )
     iniciado <- utc_now()
     result <- tryCatch(
-      run_one(meta$laz_path, opt, paths, inbox, metadata),
+      run_one(meta$laz_path, opt, paths, inbox, metadata, epsg_proc = meta$epsg_proc),
       error = function(e) list(ok = FALSE, erro = clip_err(conditionMessage(e), 1200), minutos = NA_real_, pasta_saida = "")
     )
     status <- if (isTRUE(result$ok)) "processed" else "erro"
     if (status == "erro") {
       n_erro_run <- n_erro_run + 1L
       say("FALHOU ", meta$tile_id, ": ", result$erro)
+      append_problema(paths$problemas, meta$tile_id, result$erro)
     }
     row <- list(
       tile_id = meta$tile_id,

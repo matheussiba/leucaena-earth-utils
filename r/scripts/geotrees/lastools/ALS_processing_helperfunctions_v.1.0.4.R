@@ -617,8 +617,13 @@ update.command_lastools = function(command_lastools, type_architecture){
 
 # check whether a string is in any way non-valid (empty, null, na, etc.)
 is.voidstring = function(x){
-  if(!is.character(x) | is.null(x) | is.na(x) | is.nan(x) | trimws(x) == "") return(TRUE)
-  else return(FALSE)
+  # R >= 4.5 throws on if(length > 1). Keep only the first value.
+  if (is.null(x) || length(x) == 0L) return(TRUE)
+  if (length(x) > 1L) x <- x[[1L]]
+  if (is.na(x)) return(TRUE)
+  if (!is.character(x)) return(TRUE)
+  if (!nzchar(trimws(x))) return(TRUE)
+  FALSE
 }
 
 # make sure not read in files without any data
