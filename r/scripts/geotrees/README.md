@@ -65,7 +65,7 @@ Missing R packages are installed on the first real run. `lasR` is not on CRAN; t
 
 ## Resume
 
-A tile that already has `_INFO_summary_processing.csv` and no `_ERROR.txt` under `OUT_DIR\processed\<tile>` is skipped. An interrupted tile starts over. A tile that failed is tried again on the next run. `--force` redoes successes.
+A tile that already has `_INFO_summary_processing.csv` and no `_ERROR.txt` under `OUT_DIR\processed\<utm>\<tile>` is skipped (`22` = EPSG 32722, `23` = 32723). Products are written to a staging folder and only moved into `processed` when the tile finishes successfully. Incomplete folders are removed at the start of a run. An interrupted tile starts over. A tile that failed is tried again on the next run. `--force` redoes successes.
 
 To stop between tiles, create `OUT_DIR\PARAR.txt`.
 
@@ -75,7 +75,9 @@ The first run scans the LAZ folder and the articulation table, then saves indexe
 
 | Path | Contents |
 |:-----|:---------|
-| `OUT_DIR\processed\<tile>\` | GeoTrees products for that tile. |
+| `OUT_DIR\processed\22\<tile>\` | Products for UTM zone 22 (EPSG 32722). |
+| `OUT_DIR\processed\23\<tile>\` | Products for UTM zone 23 (EPSG 32723). |
+| `OUT_DIR\geotrees_als_problemas.txt` | Append-only log of tile failures (one line per problem). |
 | `OUT_DIR\geotrees_als_registry.csv` | One row per tile. |
 | `OUT_DIR\geotrees_als_historico.csv` | One row per attempt. |
 | `OUT_DIR\geotrees_als_registro.gpkg` | Same registry, layer `geotrees_tiles`. |
