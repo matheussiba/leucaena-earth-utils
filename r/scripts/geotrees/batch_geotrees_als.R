@@ -29,7 +29,7 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.3.0"
+VERSION <- "1.3.1"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -2318,6 +2318,15 @@ main <- function() {
       error = function(e) list(ok = FALSE, erro = clip_err(conditionMessage(e), 1200), minutos = NA_real_, pasta_saida = "")
     )
     status <- if (isTRUE(result$ok)) "processed" else "erro"
+    als_code <- als_status_from_local(status, result = result)
+    if (identical(status, "processed") && !identical(als_code, 1L)) {
+      status <- "erro"
+      als_code <- 2L
+      if (!nzchar(as.character(result$erro %||% ""))) {
+        result$erro <- "ALS gate: sem produtos finais em processed/<utm>/<tile>"
+      }
+      result$pasta_saida <- ""
+    }
     if (status == "erro") {
       n_erro_run <- n_erro_run + 1L
       say("FALHOU ", meta$tile_id, ": ", result$erro)
@@ -2338,7 +2347,7 @@ main <- function() {
       status = status,
       hostname = maquina(),
       usuario = usuario(),
-      pasta_saida = as.character(result$pasta_saida),
+      pasta_saida = if (identical(als_code, 1L)) as.character(result$pasta_saida) else "",
       minutos = result$minutos,
       tamanho_mb = meta$tamanho_mb,
       erro = if (status == "erro") result$erro else "",
@@ -2382,7 +2391,7 @@ main <- function() {
     if (als$enabled) {
       pending_als <- als_buffer_push(
         als, pending_als,
-        als_result_payload(row, als_status_from_local(status), als$pipeline, paths$root),
+        als_result_payload(row, als_code, als$pipeline, paths$root),
         say_fn = say
       )
     }

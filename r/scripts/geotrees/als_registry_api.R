@@ -2,7 +2,13 @@
 # Docs: leucaena-earth-platform/docs/als-registry.md
 #
 # Status: 0 pending | 1 ok | 2 fail | 3 claim | 4 skipped
-# Flush: claim on start, report every N tiles, report at end of run.
+#
+# Rigid rule for status 1 (success):
+#   - local run must be ok
+#   - pasta_saida must exist under processed/<utm>/<tile>
+#   - _INFO_summary_processing.csv present, no _ERROR.txt
+# Never report 1 from staging / partial folders.
+# Claim (3) on start; report 1/2/4 immediately; flush leftover at end.
 
 als_ensure_http_pkgs <- function() {
   need <- c("jsonlite", "curl")
@@ -144,15 +150,24 @@ als_claim_one <- function(cfg, tile_id, hostname, usuario) {
 }
 
 als_result_payload <- function(row, status_code, pipeline, out_dir) {
+  code <- as.integer(status_code)[[1]]
+  pasta <- as.character(row$pasta_saida %||% "")
+  # Hard gate: never emit success without a finished product path.
+  if (identical(code, 1L) && (!nzchar(pasta) || !dir.exists(pasta))) {
+    code <- 2L
+    if (is.null(row$erro) || !nzchar(as.character(row$erro %||% ""))) {
+      row$erro <- "als_gate: status 1 bloqueado sem pasta_saida valida"
+    }
+  }
   list(
     tile_id = toupper(as.character(row$tile_id)),
-    status_code = as.integer(status_code),
+    status_code = code,
     minutos = if (is.null(row$minutos) || length(row$minutos) == 0L || is.na(row$minutos)) NULL else as.numeric(row$minutos),
     tamanho_mb = if (is.null(row$tamanho_mb) || length(row$tamanho_mb) == 0L || is.na(row$tamanho_mb)) NULL else as.numeric(row$tamanho_mb),
     erro = if (is.null(row$erro) || !nzchar(as.character(row$erro))) NULL else as.character(row$erro),
     hostname = as.character(row$hostname %||% ""),
     usuario = as.character(row$usuario %||% ""),
-    pasta_saida = as.character(row$pasta_saida %||% ""),
+    pasta_saida = pasta,
     out_dir = as.character(out_dir %||% ""),
     rodada_id = as.character(row$rodada_id %||% ""),
     pipeline = pipeline,
@@ -164,12 +179,26 @@ als_result_payload <- function(row, status_code, pipeline, out_dir) {
   )
 }
 
-als_status_from_local <- function(status, skipped_na = FALSE) {
+als_products_final_ok <- function(pasta_saida) {
+  pasta <- as.character(pasta_saida %||% "")
+  if (!nzchar(pasta) || !dir.exists(pasta)) return(FALSE)
+  np <- normalizePath(pasta, winslash = "/", mustWork = FALSE)
+  # Must live under processed/<utm zone>/... (22, 23, ...)
+  if (!grepl("/processed/[0-9]{2}/", np, ignore.case = TRUE)) return(FALSE)
+  info <- list.files(pasta, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
+  err <- list.files(pasta, pattern = "^_ERROR\\.txt$", recursive = TRUE)
+  length(info) > 0L && length(err) == 0L
+}
+
+als_status_from_local <- function(status, result = NULL, skipped_na = FALSE) {
   if (isTRUE(skipped_na)) return(4L)
-  if (identical(status, "processed")) return(1L)
   if (identical(status, "erro")) return(2L)
   if (identical(status, "pular") || identical(status, "skipped")) return(4L)
-  2L
+  if (!identical(status, "processed")) return(2L)
+  # status label says processed — still demand finished products on disk
+  if (is.null(result) || !isTRUE(result$ok)) return(2L)
+  if (!als_products_final_ok(result$pasta_saida)) return(2L)
+  1L
 }
 
 als_report_flush <- function(cfg, pending, say_fn = message) {
@@ -203,11 +232,35 @@ als_report_flush <- function(cfg, pending, say_fn = message) {
 
 als_buffer_push <- function(cfg, pending, payload, say_fn = message) {
   pending <- c(pending, list(payload))
-  if (length(pending) >= cfg$report_every) {
+  code <- suppressWarnings(as.integer(payload$status_code %||% NA_integer_))
+  # Terminal outcomes flush immediately so other PCs see the truth without delay.
+  flush_now <- identical(code, 1L) || identical(code, 2L) || identical(code, 4L) ||
+    length(pending) >= cfg$report_every
+  if (flush_now) {
     out <- als_report_flush(cfg, pending, say_fn = say_fn)
     return(out$pending)
   }
   pending
+}
+
+# Reset failed/stuck tiles to 0. Never touches status 1 (server rejects already_ok).
+als_reset_to_pending <- function(cfg, tile_ids, reason = "reset_for_reprocess", say_fn = message) {
+  if (!isTRUE(cfg$enabled) || !length(tile_ids)) return(invisible(list(ok = FALSE, updated = list())))
+  ids <- unique(toupper(trimws(as.character(tile_ids))))
+  ids <- ids[nzchar(ids)]
+  if (!length(ids)) return(invisible(list(ok = FALSE, updated = list())))
+  results <- lapply(ids, function(id) {
+    list(
+      tile_id = id,
+      status_code = 0L,
+      hostname = "",
+      pasta_saida = "",
+      erro = reason,
+      pipeline = cfg$pipeline
+    )
+  })
+  out <- als_report_flush(cfg, results, say_fn = say_fn)
+  invisible(list(ok = isTRUE(out$ok), pending = out$pending))
 }
 
 als_upsert_plan <- function(cfg, plan_dt, say_fn = message) {
