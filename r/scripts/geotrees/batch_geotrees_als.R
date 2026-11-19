@@ -29,7 +29,7 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.3.4"
+VERSION <- "1.3.5"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -1730,20 +1730,41 @@ issue_text <- function(logfile) {
   clip_err(txt, 1200)
 }
 
-quiet_wrap_cmd <- function(command, intern = FALSE) {
-  if (isTRUE(intern)) return(command)
+# Windows: NUNCA faca `cmd /c <linha-do-LAStools>` direto.
+# O helper ja coloca aspas em cada path (file.path.system), inclusive em "*.laz".
+# Com varias aspas, o cmd.exe mangleia a linha (regra /C de quotes) -> LAStools
+# nao acha input -> outlines vazios -> "subscript out of bounds" no clustering.
+# Solucao: gravar a linha intacta num .bat temporario e rodar esse .bat (redirect
+# >nul fica dentro do bat; CreateProcess sozinho ignora >nul).
+quiet_system_cmd <- function(command, intern = FALSE) {
+  if (isTRUE(intern)) {
+    return(list(cmd = as.character(command[[1]]), bat = NULL))
+  }
   cmd <- as.character(command[[1]])
   if (.Platform$OS.type == "windows") {
-    # CreateProcess ignores >nul unless the command runs under cmd.exe.
     if (grepl("^\\s*cmd\\s+/c\\b", cmd, ignore.case = TRUE) &&
         grepl(">nul\\s+2>&1|>NUL\\s+2>&1", cmd, ignore.case = TRUE)) {
-      return(cmd)
+      return(list(cmd = cmd, bat = NULL))
     }
-    # Nao usar shQuote() no comando inteiro: quebra glob *.laz e aspas do helper.
-    return(paste("cmd /c", cmd, ">nul 2>&1"))
+    bat <- tempfile(pattern = "geotrees_quiet_", fileext = ".bat")
+    writeLines(
+      c(
+        "@echo off",
+        "setlocal EnableExtensions DisableDelayedExpansion",
+        paste(cmd, ">nul 2>&1")
+      ),
+      bat,
+      useBytes = TRUE
+    )
+    return(list(
+      cmd = paste("cmd /c", shQuote(bat, type = "cmd")),
+      bat = bat
+    ))
   }
-  if (grepl(">/dev/null", cmd, fixed = TRUE)) return(cmd)
-  paste(cmd, ">/dev/null 2>&1")
+  if (!grepl(">/dev/null", cmd, fixed = TRUE)) {
+    cmd <- paste(cmd, ">/dev/null 2>&1")
+  }
+  list(cmd = cmd, bat = NULL)
 }
 
 install_quiet_system <- function(debug = FALSE) {
@@ -1758,14 +1779,19 @@ install_quiet_system <- function(debug = FALSE) {
     return(invisible(FALSE))
   }
   # Override system()/system2() used by the official helper so LAStools spam
-  # never hits the console (cmd.exe redirect; show.output.on.console is not enough).
+  # never hits the console (bat redirect; show.output.on.console is not enough).
   assign("system", function(command, intern = FALSE, wait = TRUE, input = NULL,
                             show.output.on.console = TRUE, minimized = FALSE,
                             invisible = TRUE, timeout = 0, ...) {
-    cmd <- quiet_wrap_cmd(command, intern = intern)
+    wrapped <- quiet_system_cmd(command, intern = intern)
+    on.exit({
+      if (!is.null(wrapped$bat) && file.exists(wrapped$bat)) {
+        try(unlink(wrapped$bat), silent = TRUE)
+      }
+    }, add = TRUE)
     if (.Platform$OS.type == "windows") {
       return(base::system(
-        cmd,
+        wrapped$cmd,
         intern = intern,
         wait = wait,
         input = input,
@@ -1776,7 +1802,10 @@ install_quiet_system <- function(debug = FALSE) {
         ...
       ))
     }
-    base::system(cmd, intern = intern, wait = wait, input = input, timeout = timeout, ...)
+    base::system(
+      wrapped$cmd, intern = intern, wait = wait, input = input,
+      timeout = timeout, ...
+    )
   }, envir = globalenv())
   assign("system2", function(command, args = character(),
                              stdout = "", stderr = "", ...) {
