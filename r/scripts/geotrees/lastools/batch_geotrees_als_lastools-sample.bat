@@ -22,6 +22,13 @@ set "ARTICULACAO="
 set "PATH_LASTOOLS=C:\LAStools\bin"
 set "MAX_HOURS="
 
+REM API leucaena.earth (multi-PC). Token = mesmo ALS_MACHINE_TOKEN do Render.
+REM Se ALS_MACHINE_TOKEN estiver vazio, a API fica desligada.
+set "ALS_API_URL=https://leucaena.earth"
+if not defined ALS_MACHINE_TOKEN set "ALS_MACHINE_TOKEN="
+REM Flush a cada N tiles (padrao 5). Claim e flush final sao imediatos.
+set "ALS_REPORT_EVERY=5"
+
 REM Nucleos passados ao pipeline LAStools. 20 = padrao do laboratorio.
 REM Vazio = nucleos fisicos - 2.
 set "N_CORES=20"
@@ -38,6 +45,9 @@ echo  Saida   : %OUT_DIR%
 echo  LAStools: %PATH_LASTOOLS%
 echo  Horas   : %MAX_HOURS%  (para entre tiles; vazio no topo vira 24)
 echo  Nucleos : %N_CORES%  (vazio = fisicos - 2)
+echo  API     : %ALS_API_URL%
+if defined ALS_MACHINE_TOKEN if not "%ALS_MACHINE_TOKEN%"=="" (echo  Token   : definido) else (echo  Token   : vazio = API desligada)
+echo  Report  : a cada %ALS_REPORT_EVERY% tile(s)
 echo  Produtos: %OUT_DIR%\processed\^<tile^>
 echo  GPKG    : %OUT_DIR%\geotrees_als_registro.gpkg
 echo  CSV     : %OUT_DIR%\geotrees_als_registry.csv
@@ -45,6 +55,7 @@ echo  MD      : %OUT_DIR%\geotrees_als_relatorio.md
 echo.
 echo  Metadata GCA: inline. CRS por tile via articulacao.epsg.
 echo  31983-^>32723 | 31982-^>32722. Mistura: um fuso inteiro, depois o outro.
+echo  Multi-PC: claim na API antes de cada tile; report a cada N; flush no fim.
 echo  Pula tile que ja tem _INFO_summary_processing.csv nesta saida.
 echo  Se parar no meio, rode de novo: continua do que falta.
 echo  Erro entra de novo na proxima rodada. --force refaz tudo.
@@ -105,16 +116,21 @@ set "LIMIT_ARG="
 set "ARTIC_ARG="
 set "LASTOOLS_ARG=--path-lastools "%PATH_LASTOOLS%""
 set "HOURS_ARG=--max-hours %MAX_HOURS%"
+set "ALS_URL_ARG=--als-api-url "%ALS_API_URL%""
+set "ALS_TOK_ARG="
+set "ALS_REP_ARG="
+if defined ALS_MACHINE_TOKEN if not "%ALS_MACHINE_TOKEN%"=="" set "ALS_TOK_ARG=--als-api-token %ALS_MACHINE_TOKEN%"
+if defined ALS_REPORT_EVERY set "ALS_REP_ARG=--als-report-every %ALS_REPORT_EVERY%"
 if defined BLOCO set "BLOCO_ARG=--bloco %BLOCO%"
 if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
 if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
 if defined ARTICULACAO set "ARTIC_ARG=--articulacao "%ARTICULACAO%""
 
 echo Comando:
-echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %*
+echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_TOK_ARG% %ALS_REP_ARG% %*
 echo.
 
-"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_TOK_ARG% %ALS_REP_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 REM 3 = outra copia ainda segura a trava. Fecha esta janela sem pause.

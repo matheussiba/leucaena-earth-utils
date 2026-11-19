@@ -83,6 +83,10 @@ The first run scans the LAZ folder and the articulation table, then saves indexe
 
 The time estimate is printed after each finished tile. It is the mean of successful tiles on this computer times the tiles still queued.
 
+## leucaena.earth ALS API (multi-PC)
+
+Both `batch_geotrees_als.R` and `batch_geotrees_als_lastools.R` can coordinate tiles through the [leucaena.earth](https://leucaena.earth) ALS registry. When `ALS_MACHINE_TOKEN` is set (or you pass `--als-api-token`), the batch upserts the plan, **claims** each tile before processing, **reports** results every **5** tiles by default (`ALS_REPORT_EVERY` / `--als-report-every`), and **flushes** any remaining reports at the end of the run. Tiles without a mappable CRS are reported as skipped (status 4). Shared client: `als_registry_api.R`.
+
 ## LAStools variant
 
 Same batch flow, but calling the official helper with `path_lastools` set. Files live under `lastools/`:
