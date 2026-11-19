@@ -26,12 +26,13 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.0.0"
+VERSION <- "1.1.0"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
   "tile_id", "laz_nome", "laz_path", "bloco", "layer_artic",
   "nomenc_2k", "nomenc_5k", "nomenc_10k", "periodvoo",
+  "epsg_artic", "epsg_proc",
   "status", "hostname", "usuario", "pasta_saida",
   "minutos", "tamanho_mb", "erro", "iniciado_utc", "finalizado_utc",
   "rodada_id", "origem"
@@ -40,12 +41,13 @@ REG_COLS <- c(
 HIST_COLS <- c(
   "rodada_id", "tile_id", "laz_nome", "laz_path", "bloco", "status",
   "hostname", "usuario", "minutos", "erro", "iniciado_utc", "finalizado_utc",
-  "bloco_filtro", "out_dir"
+  "bloco_filtro", "out_dir", "epsg_proc"
 )
 
 GPKG_COLS <- c(
   "tile_id", "laz_nome", "laz_path", "bloco", "layer_artic",
   "nomenc_2k", "nomenc_5k", "nomenc_10k", "periodvoo",
+  "epsg_artic", "epsg_proc",
   "status", "hostname", "usuario", "pasta_saida",
   "minutos", "tamanho_mb", "erro", "finalizado_utc", "rodada_id", "origem"
 )
@@ -191,7 +193,7 @@ help_text <- function() {
     "  --bloco COD           Campo BLOCO da articulacao. Vazio = pasta inteira.",
     "                        Varios: EF,2024",
     "  --out-dir DIR         Registro + produtos (padrao G:/geotrees_als).",
-    "  --articulacao GPKG    Articulacao IGC. Padrao: data/articulacao_igc_sp/ no clone.",
+    "  --articulacao GPKG    Articulacao IGC (obrigatoria para CRS). Padrao no clone.",
     "  --articulacao-layer   Nome da camada.",
     "  --n-cores N           Padrao: nucleos fisicos - 2.",
     "  --resolution M        Padrao 1.",
@@ -204,9 +206,12 @@ help_text <- function() {
     "  --report-only         Regera CSV, GPKG e .md a partir do que ja esta no disco.",
     "  --no-blast            Desliga use.blast2dem (padrao: ligado).",
     "  --force-utm VAL       false | true | from_metadata (padrao).",
-    "  --metadata CSV        CSV de metadados do GeoTrees. Vazio = o pipeline procura sozinho.",
+    "  --metadata CSV        Opcional. Sobrescreve campos do template inline (acq_crs nao).",
     "  --name-job NOME       Padrao igc.",
     "",
+    "CRS: metadata GCA fica inline. acq_crs por tile via articulacao.epsg:",
+    "  31983 -> overwrite.with:EPSG:32723 | 31982 -> overwrite.with:EPSG:32722",
+    "Pasta com os dois fusos: processa um grupo EPSG inteiro, depois o outro.",
     "Parar no meio: crie PARAR.txt em OUT_DIR (a checagem e entre tiles).",
     "A primeira rodada grava o indice dos .laz e o da articulacao em OUT_DIR.",
     "As seguintes reutilizam esses arquivos. Para reler a pasta, apague geotrees_als_laz_indice.csv.",
@@ -333,6 +338,16 @@ this_file <- function() {
 }
 
 repo_root <- function(dir_script) {
+  cur <- normalizePath(dir_script, winslash = "/", mustWork = FALSE)
+  for (i in seq_len(8L)) {
+    if (dir.exists(file.path(cur, "data", "articulacao_igc_sp")) ||
+        file.exists(file.path(cur, ".git"))) {
+      return(cur)
+    }
+    parent <- dirname(cur)
+    if (identical(parent, cur)) break
+    cur <- parent
+  }
   normalizePath(file.path(dir_script, "..", "..", ".."), winslash = "/", mustWork = FALSE)
 }
 
@@ -343,6 +358,45 @@ default_articulacao <- function(dir_script) {
   if (file.exists(bundled)) return(normalizePath(bundled, winslash = "/"))
   if (file.exists(local)) return(normalizePath(local, winslash = "/"))
   normalizePath(bundled, winslash = "/", mustWork = FALSE)
+}
+
+# Template inline (mesmo conteudo do _GCA_metadata.csv do laboratorio).
+# acq_crs vem da articulacao: 31983 -> 32723, 31982 -> 32722.
+map_epsg_proc <- function(epsg) {
+  e <- suppressWarnings(as.integer(epsg))
+  out <- rep(NA_integer_, length(e))
+  out[e == 31983L] <- 32723L
+  out[e == 31982L] <- 32722L
+  out
+}
+
+inline_gca_metadata <- function(epsg_proc) {
+  epsg_proc <- suppressWarnings(as.integer(epsg_proc[[1]]))
+  if (is.na(epsg_proc) || epsg_proc <= 0L) {
+    stop("epsg_proc invalido para metadata inline.", call. = FALSE)
+  }
+  data.table::data.table(
+    subfolder = ".",
+    dataset = "SaoPauloState",
+    site = "Itu",
+    source = "Rodrigo Costa Pinto / Matheus Pinheiro Ferreira",
+    citation = "CMQ 2026.",
+    contact = "rodrigopinto@usp.br",
+    access = "open",
+    license = "",
+    updated = "23/10/2026",
+    id_orig = "",
+    acq_type = "ALS",
+    acq_crs = paste0("overwrite.with:EPSG:", epsg_proc),
+    acq_units = "m",
+    acq_mindt = "01/12/2025",
+    acq_maxdt = "10/12/2025",
+    acq_system = "",
+    acq_AGL = NA_real_,
+    acq_swath = NA_real_,
+    notes = "Matrice 350 L2; CRS da articulacao IGC mapeado para WGS84 UTM",
+    issues = ""
+  )
 }
 
 out_paths <- function(out_dir) {
@@ -403,7 +457,10 @@ read_artic_table <- function(path, layer) {
     )
   }
   sql <- sprintf(
-    'SELECT "NOMENC_2K", "NOMENC_5K", "NOMENC_10K", "BLOCO", "layer", "periodvoo" FROM "%s"',
+    paste0(
+      'SELECT "NOMENC_2K", "NOMENC_5K", "NOMENC_10K", "BLOCO", "layer", ',
+      '"periodvoo", "epsg" FROM "%s"'
+    ),
     layer
   )
   say("Consultando a tabela da articulacao (SQLite, somente leitura)...")
@@ -418,28 +475,35 @@ build_index <- function(raw) {
     if (!col %in% names(raw)) raw[, (col) := ""]
     raw[, (col) := ifelse(is.na(get(col)), "", trimws(as.character(get(col))))]
   }
+  if (!"epsg" %in% names(raw)) raw[, epsg := NA_integer_]
+  raw[, epsg := suppressWarnings(as.integer(epsg))]
+  raw[, epsg_proc := map_epsg_proc(epsg)]
   pieces <- data.table::rbindlist(list(
     raw[nzchar(NOMENC_2K), .(
       tile_id = toupper(NOMENC_2K), via = "NOMENC_2K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
-      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K
+      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
+      epsg_artic = epsg, epsg_proc = epsg_proc
     )],
     raw[nzchar(NOMENC_5K), .(
       tile_id = toupper(NOMENC_5K), via = "NOMENC_5K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
-      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K
+      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
+      epsg_artic = epsg, epsg_proc = epsg_proc
     )],
     raw[nzchar(NOMENC_10K), .(
       tile_id = toupper(NOMENC_10K), via = "NOMENC_10K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
-      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K
+      nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
+      epsg_artic = epsg, epsg_proc = epsg_proc
     )]
   ), use.names = TRUE)
   if (!nrow(pieces)) {
     return(data.table::data.table(
       tile_id = character(), via = character(), bloco = character(),
       layer_artic = character(), periodvoo = character(),
-      nomenc_2k = character(), nomenc_5k = character(), nomenc_10k = character()
+      nomenc_2k = character(), nomenc_5k = character(), nomenc_10k = character(),
+      epsg_artic = integer(), epsg_proc = integer()
     ))
   }
   pieces[!duplicated(tile_id)]
@@ -643,20 +707,33 @@ adopt_disk <- function(registry, done, host, user) {
 
 fill_artic_on_registry <- function(registry, idx) {
   if (!nrow(registry) || !nrow(idx)) return(registry)
-  pegar <- c("bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k")
-  cols <- c("tile_id", pegar)
+  pegar <- c(
+    "bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k",
+    "epsg_artic", "epsg_proc"
+  )
+  tem <- pegar[pegar %in% names(idx)]
+  if (!length(tem)) return(registry)
+  cols <- c("tile_id", tem)
   idx2 <- data.table::copy(idx[!duplicated(tile_id), ..cols])
-  data.table::setnames(idx2, pegar, paste0("art_", pegar))
+  data.table::setnames(idx2, tem, paste0("art_", tem))
   m <- merge(registry, idx2, by = "tile_id", all.x = TRUE, sort = FALSE)
-  for (col in pegar) {
+  for (col in tem) {
     art <- m[[paste0("art_", col)]]
-    art[is.na(art)] <- ""
-    vazio <- !nzchar(ifelse(is.na(m[[col]]), "", m[[col]])) & nzchar(art)
-    atual <- ifelse(is.na(m[[col]]), "", m[[col]])
-    atual[vazio] <- art[vazio]
-    m[, (col) := atual]
+    if (col %in% c("epsg_artic", "epsg_proc")) {
+      art_num <- suppressWarnings(as.integer(art))
+      cur_num <- suppressWarnings(as.integer(m[[col]]))
+      vazio <- is.na(cur_num) | cur_num <= 0L
+      cur_num[vazio & !is.na(art_num)] <- art_num[vazio & !is.na(art_num)]
+      m[, (col) := cur_num]
+    } else {
+      art[is.na(art)] <- ""
+      vazio <- !nzchar(ifelse(is.na(m[[col]]), "", m[[col]])) & nzchar(art)
+      atual <- ifelse(is.na(m[[col]]), "", m[[col]])
+      atual[vazio] <- art[vazio]
+      m[, (col) := atual]
+    }
   }
-  m[, paste0("art_", pegar) := NULL]
+  m[, paste0("art_", tem) := NULL]
   m
 }
 
@@ -843,10 +920,15 @@ load_artic_index <- function(path, meta_path, artic_path) {
     data.table::fread(path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
     error = function(e) NULL
   )
-  precisa <- c("tile_id", "via", "bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k")
+  precisa <- c(
+    "tile_id", "via", "bloco", "layer_artic", "periodvoo",
+    "nomenc_2k", "nomenc_5k", "nomenc_10k", "epsg_artic", "epsg_proc"
+  )
   if (is.null(idx) || !all(precisa %in% names(idx))) return(NULL)
   say("Indice da articulacao da primeira leitura: ", nrow(idx), " id(s). O GPKG nao sera lido de novo.")
   say("  ", path)
+  idx[, epsg_artic := suppressWarnings(as.integer(epsg_artic))]
+  idx[, epsg_proc := suppressWarnings(as.integer(epsg_proc))]
   idx[, ..precisa]
 }
 
@@ -865,13 +947,19 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
     plan <- files_dt
     plan[, `:=`(
       via = "", bloco = "", layer_artic = "", periodvoo = "",
-      nomenc_2k = "", nomenc_5k = "", nomenc_10k = ""
+      nomenc_2k = "", nomenc_5k = "", nomenc_10k = "",
+      epsg_artic = NA_integer_, epsg_proc = NA_integer_
     )]
   }
   for (col in c("bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k", "via")) {
     if (!col %in% names(plan)) plan[, (col) := ""]
     plan[is.na(get(col)), (col) := ""]
   }
+  if (!"epsg_artic" %in% names(plan)) plan[, epsg_artic := NA_integer_]
+  if (!"epsg_proc" %in% names(plan)) plan[, epsg_proc := NA_integer_]
+  plan[, epsg_artic := suppressWarnings(as.integer(epsg_artic))]
+  plan[, epsg_proc := suppressWarnings(as.integer(epsg_proc))]
+  plan[is.na(epsg_proc) & !is.na(epsg_artic), epsg_proc := map_epsg_proc(epsg_artic)]
   if (length(blocos)) {
     plan[, no_filtro := toupper(bloco) %in% blocos]
   } else {
@@ -881,7 +969,13 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
     !no_filtro, "fora_do_bloco",
     data.table::fifelse(tile_id %in% done_ids & !force, "pular", "processar")
   )]
-  data.table::setorder(plan, bloco, tile_id)
+  # Sem CRS mapeavel nao processa.
+  plan[
+    acao == "processar" & (is.na(epsg_proc) | epsg_proc <= 0L),
+    acao := "sem_crs"
+  ]
+  # Mistura de fusos: processa um EPSG inteiro, depois o outro.
+  data.table::setorder(plan, epsg_proc, bloco, tile_id)
   if (limit > 0L) {
     idx_go <- which(plan$acao == "processar")
     if (length(idx_go) > limit) {
@@ -892,12 +986,32 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
   plan[acao == "pular", motivo := "ja processado nesta maquina"]
   plan[acao == "fora_do_bloco", motivo := "fora do filtro de BLOCO"]
   plan[acao == "adiado_limit", motivo := "alem do --limit desta rodada"]
+  plan[acao == "sem_crs", motivo := "sem epsg na articulacao (31982/31983)"]
   plan[acao == "processar" & !nzchar(layer_artic), motivo := "sem ficha na articulacao"]
   attr(plan, "n_dup") <- n_dup
+  n_go <- sum(plan$acao == "processar")
+  grupos <- if (n_go) {
+    plan[acao == "processar", .N, by = epsg_proc][order(epsg_proc)]
+  } else {
+    data.table::data.table(epsg_proc = integer(), N = integer())
+  }
   say(
     "Plano pronto. Unicos: ", nrow(plan),
     " | duplicados deixados de lado: ", n_dup, "."
   )
+  if (nrow(grupos)) {
+    say(
+      "Fila por EPSG de processamento (articulacao 31983->32723, 31982->32722): ",
+      paste(sprintf("%s=%d", grupos$epsg_proc, grupos$N), collapse = " | ")
+    )
+  }
+  n_sem <- sum(plan$acao == "sem_crs")
+  if (n_sem) {
+    say(
+      "AVISO: ", n_sem,
+      " tile(s) sem epsg mapeavel na articulacao. Nao entram na fila."
+    )
+  }
   plan
 }
 
@@ -916,6 +1030,8 @@ row_to_sf <- function(row, geom) {
     nomenc_5k = as.character(row$nomenc_5k),
     nomenc_10k = as.character(row$nomenc_10k),
     periodvoo = as.character(row$periodvoo),
+    epsg_artic = suppressWarnings(as.integer(row$epsg_artic)),
+    epsg_proc = suppressWarnings(as.integer(row$epsg_proc)),
     status = as.character(row$status),
     hostname = as.character(row$hostname),
     usuario = as.character(row$usuario),
@@ -1513,6 +1629,10 @@ blank_meta <- function(plan_row) {
     x[[nm]] <- as.character(x[[nm]])
   }
   x$tamanho_mb <- suppressWarnings(as.numeric(plan_row$tamanho_mb))
+  x$epsg_artic <- suppressWarnings(as.integer(plan_row$epsg_artic))
+  x$epsg_proc <- suppressWarnings(as.integer(plan_row$epsg_proc))
+  if (length(x$epsg_artic) != 1L) x$epsg_artic <- NA_integer_
+  if (length(x$epsg_proc) != 1L) x$epsg_proc <- NA_integer_
   x
 }
 
@@ -1685,10 +1805,10 @@ main <- function() {
       )
     }
     cat("AVISO: articulacao nao encontrada em:\n  ", opt$articulacao, "\n", sep = "")
-    cat("BLOCO esta vazio, entao a pasta inteira entra na fila.\n")
-    cat("Para dois blocos, no .bat: set \"BLOCO=EF,2024\"\n")
-    cat("O GPKG fica em data/articulacao_igc_sp/ dentro do clone:\n")
+    cat("Sem articulacao nao ha campo epsg: nenhum tile recebe CRS (31982->32722 / 31983->32723).\n")
+    cat("O GPKG precisa estar em data/articulacao_igc_sp/ dentro do clone:\n")
     cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
+    cat("Ou passe --articulacao com o caminho do arquivo.\n")
   } else {
     cached_idx <- load_artic_index(paths$artic_index, paths$artic_index_meta, opt$articulacao)
     if (!is.null(cached_idx)) {
@@ -1768,7 +1888,23 @@ main <- function() {
     cat("  processar:    ", sum(plan$acao == "processar"), "\n", sep = "")
     cat("  pular:        ", sum(plan$acao == "pular"), "\n", sep = "")
     cat("  fora do bloco:", sum(plan$acao == "fora_do_bloco"), "\n", sep = "")
+    cat("  sem CRS:      ", sum(plan$acao == "sem_crs"), "\n", sep = "")
     cat("  alem do limit:", sum(plan$acao == "adiado_limit"), "\n", sep = "")
+    go <- plan[acao == "processar"]
+    if (nrow(go)) {
+      grp <- go[, .N, by = .(epsg_artic, epsg_proc)][order(epsg_proc)]
+      cat("  grupos EPSG (artic -> proc):\n")
+      for (gi in seq_len(nrow(grp))) {
+        cat(
+          sprintf(
+            "    %s -> %s : %d tile(s)\n",
+            as.character(grp$epsg_artic[[gi]]),
+            as.character(grp$epsg_proc[[gi]]),
+            grp$N[[gi]]
+          )
+        )
+      }
+    }
   }
   cat("\n")
 
@@ -1796,8 +1932,8 @@ main <- function() {
     dest <- write_md(modo)
     if (!is.null(plan) && any(plan$acao == "processar")) {
       prev <- head(plan[acao == "processar"], 20L)
-      cat("Primeiros a processar:\n")
-      print(prev[, .(tile_id, bloco, laz_nome)])
+      cat("Primeiros a processar (ja agrupados por epsg_proc):\n")
+      print(prev[, .(tile_id, bloco, epsg_artic, epsg_proc, laz_nome)])
     }
     if (opt$list_blocos && !is.null(plan) && nrow(plan)) {
       cat("\nBLOCO nesta pasta:\n")
@@ -1832,8 +1968,12 @@ main <- function() {
   }
 
   source_helper(file.path(dir_script, "ALS_processing_helperfunctions.R"))
-  metadata <- NULL
-  if (nzchar(opt$metadata)) metadata <- data.table::fread(opt$metadata)
+  say("Metadata GCA: inline (acq_crs por tile via articulacao).")
+  meta_base <- NULL
+  if (nzchar(opt$metadata)) {
+    say("Sobrescrevendo campos do template com --metadata: ", opt$metadata)
+    meta_base <- data.table::fread(opt$metadata)
+  }
   inbox <- inbox_for(opt$laz_dir, paths$root, paths$inbox)
   filtro_txt <- if (length(blocos)) paste(blocos, collapse = ",") else "*"
   n_fila <- nrow(fila)
@@ -1843,8 +1983,10 @@ main <- function() {
   cat("Retomada: ", n_pulados, " tile(s) ja prontos nesta saida e nao serao refeitos.\n", sep = "")
   cat("Na fila agora: ", n_fila, ".\n", sep = "")
   cat("Se o script parou no meio de um .laz, esse arquivo comeca de novo. Os que ja terminaram ficam pulados.\n")
+  cat("Ordem: um grupo EPSG por vez (32722 depois 32723, conforme a articulacao).\n")
   mostrar_eta(rodada, registry, n_fila)
 
+  epsg_atual <- NA_integer_
   for (i in seq_len(n_fila)) {
     if (file.exists(paths$parar)) {
       parou <- TRUE
@@ -1853,6 +1995,85 @@ main <- function() {
     }
     item <- fila[i]
     meta <- blank_meta(item)
+    if (is.na(meta$epsg_proc) || meta$epsg_proc <= 0L) {
+      n_erro_run <- n_erro_run + 1L
+      say("FALHOU ", meta$tile_id, ": sem epsg_proc na articulacao.")
+      result <- list(
+        ok = FALSE,
+        erro = "sem epsg_proc na articulacao (esperado 31982->32722 ou 31983->32723)",
+        minutos = NA_real_,
+        pasta_saida = ""
+      )
+      status <- "erro"
+      iniciado <- utc_now()
+      row <- list(
+        tile_id = meta$tile_id,
+        laz_nome = meta$laz_nome,
+        laz_path = meta$laz_path,
+        bloco = meta$bloco,
+        layer_artic = meta$layer_artic,
+        nomenc_2k = meta$nomenc_2k,
+        nomenc_5k = meta$nomenc_5k,
+        nomenc_10k = meta$nomenc_10k,
+        periodvoo = meta$periodvoo,
+        epsg_artic = meta$epsg_artic,
+        epsg_proc = meta$epsg_proc,
+        status = status,
+        hostname = maquina(),
+        usuario = usuario(),
+        pasta_saida = "",
+        minutos = NA_real_,
+        tamanho_mb = meta$tamanho_mb,
+        erro = result$erro,
+        iniciado_utc = iniciado,
+        finalizado_utc = utc_now(),
+        rodada_id = format(t_run, "%Y%m%dT%H%M%S"),
+        origem = "pipeline"
+      )
+      registry <- put_registry(registry, row)
+      save_registry(paths$registry, registry)
+      append_historico(paths$historico, list(
+        rodada_id = row$rodada_id,
+        tile_id = row$tile_id,
+        laz_nome = row$laz_nome,
+        laz_path = row$laz_path,
+        bloco = row$bloco,
+        status = row$status,
+        hostname = row$hostname,
+        usuario = row$usuario,
+        minutos = row$minutos,
+        erro = row$erro,
+        iniciado_utc = row$iniciado_utc,
+        finalizado_utc = row$finalizado_utc,
+        bloco_filtro = filtro_txt,
+        epsg_proc = meta$epsg_proc,
+        out_dir = paths$root
+      ))
+      next
+    }
+    if (is.na(epsg_atual) || epsg_atual != meta$epsg_proc) {
+      epsg_atual <- meta$epsg_proc
+      n_grupo <- sum(fila$epsg_proc == epsg_atual, na.rm = TRUE)
+      say(
+        "=== Grupo EPSG ", epsg_atual,
+        " (articulacao ", meta$epsg_artic, " -> ", epsg_atual, ", ",
+        n_grupo, " tile(s) neste grupo) ==="
+      )
+      log_line(
+        paths$runlog,
+        sprintf(
+          "Grupo EPSG %s (artic %s): %d tile(s)",
+          epsg_atual, meta$epsg_artic, n_grupo
+        )
+      )
+    }
+    metadata <- inline_gca_metadata(meta$epsg_proc)
+    if (!is.null(meta_base) && nrow(meta_base)) {
+      keep_crs <- metadata$acq_crs
+      metadata <- data.table::rbindlist(list(meta_base[1], metadata), use.names = TRUE, fill = TRUE)
+      metadata <- metadata[.N]
+      metadata[, acq_crs := keep_crs]
+    }
     faltam_agora <- n_fila - i + 1L
     eta_antes <- eta_agora(rodada, registry, faltam_agora)
     if (eta_antes$n_base > 0L) {
@@ -1867,7 +2088,12 @@ main <- function() {
     }
     log_line(
       paths$runlog,
-      sprintf("[%d/%d] PROCESSANDO %s | bloco %s", i, n_fila, meta$tile_id, if (nzchar(meta$bloco)) meta$bloco else "-")
+      sprintf(
+        "[%d/%d] PROCESSANDO %s | bloco %s | EPSG %s -> %s",
+        i, n_fila, meta$tile_id,
+        if (nzchar(meta$bloco)) meta$bloco else "-",
+        as.character(meta$epsg_artic), as.character(meta$epsg_proc)
+      )
     )
     iniciado <- utc_now()
     result <- tryCatch(
@@ -1889,6 +2115,8 @@ main <- function() {
       nomenc_5k = meta$nomenc_5k,
       nomenc_10k = meta$nomenc_10k,
       periodvoo = meta$periodvoo,
+      epsg_artic = meta$epsg_artic,
+      epsg_proc = meta$epsg_proc,
       status = status,
       hostname = maquina(),
       usuario = usuario(),
@@ -1917,6 +2145,7 @@ main <- function() {
       iniciado_utc = row$iniciado_utc,
       finalizado_utc = row$finalizado_utc,
       bloco_filtro = filtro_txt,
+      epsg_proc = meta$epsg_proc,
       out_dir = paths$root
     ))
     rodada <- data.table::rbindlist(list(rodada, data.table::data.table(

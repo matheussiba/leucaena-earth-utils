@@ -100,10 +100,19 @@ Extra variables in the sample `.bat`:
 | `PATH_LASTOOLS` | `C:\LAStools\bin` | LAStools `bin` folder. |
 | `MAX_HOURS` | empty → `24` | Stop between tiles after this many hours. |
 
+GCA metadata is **inline** in the R wrapper (no `_GCA_metadata.csv` required). Per-tile `acq_crs` comes from the articulation `epsg` field:
+
+| Articulation `epsg` | Processing CRS |
+|:--------------------|:---------------|
+| `31983` | `overwrite.with:EPSG:32723` |
+| `31982` | `overwrite.with:EPSG:32722` |
+
+If the LAZ folder mixes both zones, the queue runs one EPSG group fully, then the other. Tiles without a mappable `epsg` are skipped (`sem_crs`). The articulation GeoPackage must be present (bundled under `data/articulacao_igc_sp/` or `--articulacao`).
+
 ```bat
 cd lastools
 copy batch_geotrees_als_lastools-sample.bat batch_geotrees_als_lastools.bat
 batch_geotrees_als_lastools.bat
 ```
 
-Use a different `OUT_DIR` than the open-source run so registries and locks stay separate.
+Use a different `OUT_DIR` than the open-source run so registries and locks stay separate. If an old articulation index exists under `OUT_DIR` without `epsg` columns, delete `geotrees_als_artic_indice.csv` (and its `_meta`) once so it rebuilds.
