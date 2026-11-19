@@ -82,3 +82,28 @@ The first run scans the LAZ folder and the articulation table, then saves indexe
 | `OUT_DIR\geotrees_als_relatorio.md` | Markdown report, including the time estimate for this machine. |
 
 The time estimate is printed after each finished tile. It is the mean of successful tiles on this computer times the tiles still queued.
+
+## LAStools variant
+
+Same batch flow, but calling the official helper with `path_lastools` set. Files live under `lastools/`:
+
+| File | Role |
+|:-----|:-----|
+| `batch_geotrees_als_lastools-sample.bat` | Tracked sample. Copy to `batch_geotrees_als_lastools.bat` and edit. |
+| `batch_geotrees_als_lastools.R` | Wrapper. Defaults: `size_tile` 250, `use.blast2dem` off, `retile` `include.adjacents`. |
+| `ALS_processing_helperfunctions_v.1.0.4.R` | Official LAStools pipeline. |
+
+Extra variables in the sample `.bat`:
+
+| Variable | Default | Meaning |
+|:---------|:--------|:--------|
+| `PATH_LASTOOLS` | `C:\LAStools\bin` | LAStools `bin` folder. |
+| `MAX_HOURS` | empty → `24` | Stop between tiles after this many hours. |
+
+```bat
+cd lastools
+copy batch_geotrees_als_lastools-sample.bat batch_geotrees_als_lastools.bat
+batch_geotrees_als_lastools.bat
+```
+
+Use a different `OUT_DIR` than the open-source run so registries and locks stay separate.
