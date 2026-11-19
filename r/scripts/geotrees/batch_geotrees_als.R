@@ -1534,19 +1534,44 @@ pid_is_running <- function(pid) {
   if (.Platform$OS.type != "windows") {
     return(system2("kill", c("-0", as.character(pid)), stdout = FALSE, stderr = FALSE) == 0L)
   }
-  out <- tryCatch(
-    system2(
-      "tasklist",
-      c("/FI", sprintf("PID eq %d", pid), "/FO", "CSV", "/NH"),
+  # PowerShell: empty output = PID not found. More reliable than tasklist exit codes.
+  ps <- tryCatch(
+    suppressWarnings(system2(
+      "powershell",
+      c(
+        "-NoProfile", "-Command",
+        sprintf(
+          "if (Get-Process -Id %d -ErrorAction SilentlyContinue) { '%d' } else { '' }",
+          pid, pid
+        )
+      ),
       stdout = TRUE,
       stderr = TRUE
-    ),
+    )),
     error = function(e) character()
   )
-  if (!length(out)) return(NA)
-  if (any(grepl(sprintf("\"%d\"", pid), out, fixed = TRUE))) return(TRUE)
-  status <- attr(out, "status")
-  if (!is.null(status) && !identical(as.integer(status), 0L)) return(NA)
+  if (any(grepl(sprintf("^\\s*%d\\s*$", pid), ps))) return(TRUE)
+
+  tl <- tryCatch(
+    suppressWarnings(system2(
+      "cmd",
+      c("/c", sprintf('tasklist /FI "PID eq %d" /FO CSV /NH', pid)),
+      stdout = TRUE,
+      stderr = TRUE
+    )),
+    error = function(e) character()
+  )
+  if (any(grepl(sprintf("\"%d\"", pid), tl, fixed = TRUE))) return(TRUE)
+  txt <- paste(c(ps, tl), collapse = " ")
+  if (grepl(
+    "No tasks are running|nenhuma tarefa|Cannot find a process|nao encontrado|não encontrado",
+    txt,
+    ignore.case = TRUE
+  )) {
+    return(FALSE)
+  }
+  # Empty PowerShell result already means not running.
+  if (!length(ps) || all(!nzchar(trimws(ps)))) return(FALSE)
   FALSE
 }
 
@@ -1568,16 +1593,6 @@ acquire_lock <- function(path) {
         msg, "\n",
         "A outra janela continua. Esta sera fechada."
       )
-    }
-    if (is.na(vivo)) {
-      age_h <- as.numeric(difftime(Sys.time(), file.info(path)$mtime, units = "hours"))
-      if (!is.na(age_h) && age_h < 6) {
-        stop_lock_busy(
-          "Nao consegui confirmar se o PID da trava ainda existe.\n",
-          "Trava: ", path, "\n",
-          "A outra janela, se ainda estiver aberta, continua. Esta sera fechada."
-        )
-      }
     }
     cat(
       "Trava antiga encontrada (PID ", if (is.na(pid)) "?" else pid,
