@@ -508,8 +508,13 @@ update.command_lastools = function(command_lastools, type_architecture){
 
 # check whether a string is in any way non-valid (empty, null, na, etc.)
 is.voidstring = function(x){
-  if(!is.character(x) | is.null(x) | is.na(x) | is.nan(x) | trimws(x) == "") return(TRUE)
-  else return(FALSE)
+  # R >= 4.5 throws on if(length > 1). Keep only the first value.
+  if (is.null(x) || length(x) == 0L) return(TRUE)
+  if (length(x) > 1L) x <- x[[1L]]
+  if (is.na(x)) return(TRUE)
+  if (!is.character(x)) return(TRUE)
+  if (!nzchar(trimws(x))) return(TRUE)
+  FALSE
 }
 
 # make sure not read in files without any data
@@ -4635,32 +4640,41 @@ process.datasubset = function(path_lastools, path_tmp, path_input, path_output, 
             path_output_local = file.path(params_general$path_data, "lasgrid")
             if(!dir.exists(path_output_local)) dir.create(path_output_local, recursive = TRUE)
             
-            # files.input = list.files(path = params_general$path_data, pattern = "\\.laz", full.names = TRUE)
-            # files_names.input = list.files(path = params_general$path_data, pattern = "\\.laz", full.names = FALSE)
-            
-            ctg <- readLAScatalog(params_general$path_data)
-            crs_scan <- crs(ctg)
-            
-            opt_chunk_size(ctg)   <- size_tile
-            opt_chunk_buffer(ctg) <- size_buffer
-            opt_output_files(ctg) <- file.path(path_output_local, "chunk_{ID}_initial_classif")
-            opt_progress(ctg) <- T
-            
-            future::plan(future::multisession, workers = params_general$n_cores)
-            
-            majority_class <- function(z) {
-              v = which.max(table(z))
-              v = as.numeric(names(v))
-              return(v)
-            }
-            
-            catalog_apply(ctg, function(las_chunk) {
-              r <- grid_metrics(las_chunk, ~majority_class(Classification), res = resolution)
-              return(r)}
+            # One LAZ at a time (batch already walks tile by tile). Do NOT use
+            # catalog_apply + multisession here: with size_tile=100 a single file
+            # becomes hundreds of chunks and 20 workers exhaust RAM (OpenBLAS /
+            # FutureError). pixel_metrics on the whole file is enough.
+            files.input = list.files(
+              path = params_general$path_data,
+              pattern = "\\.(laz|las)$",
+              full.names = TRUE,
+              ignore.case = TRUE,
+              recursive = FALSE
             )
+            if (!length(files.input)) {
+              stop("Open source classification: no .laz/.las in ", params_general$path_data)
+            }
+            cat("Classification files:", length(files.input), "| resolution:", resolution, "\n")
             
-            future::plan(future::sequential)
-            gc()
+            for (i in seq_along(files.input)) {
+              f_in <- files.input[[i]]
+              cat("  classif", i, "/", length(files.input), ":", basename(f_in), "\n")
+              las <- lidR::readLAS(f_in)
+              if (lidR::is.empty(las)) {
+                cat("    empty, skipped\n")
+                next
+              }
+              r <- lidR::pixel_metrics(
+                las,
+                ~as.numeric(names(which.max(table(Classification)))),
+                res = resolution,
+                pkg = "terra"
+              )
+              ofile <- file.path(path_output_local, sprintf("chunk_%d_initial_classif.tif", i))
+              terra::writeRaster(r, filename = ofile, overwrite = TRUE)
+              rm(las, r)
+              gc(verbose = FALSE)
+            }
             
           }
           

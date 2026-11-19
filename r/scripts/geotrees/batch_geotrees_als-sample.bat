@@ -18,7 +18,8 @@ set "BLOCO="
 set "OUT_DIR=G:\geotrees_als"
 set "ARTICULACAO="
 
-REM Nucleos passados ao pipeline. 20 = padrao do laboratorio.
+REM Nucleos passados ao pipeline (lasR e afins). 20 = padrao do laboratorio.
+REM A classificacao inicial open-source nao abre 20 workers: isso estourava a RAM.
 REM Vazio = nucleos fisicos - 2.
 set "N_CORES=20"
 REM Opcional. Vazio = sem limite. 1 = so o primeiro tile novo (teste).

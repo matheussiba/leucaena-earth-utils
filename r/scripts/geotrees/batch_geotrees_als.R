@@ -735,6 +735,14 @@ dedupe_lidar <- function(files) {
     tile_id = character(), tamanho_mb = numeric()
   )
   if (!length(files)) return(list(dt = vazio, n_dup = 0L))
+  # COPC is not readable by the open-source lasR/LASlib path used here.
+  n_antes <- length(files)
+  files <- files[!grepl("\\.copc\\.laz$", files, ignore.case = TRUE)]
+  n_copc <- n_antes - length(files)
+  if (n_copc > 0L) {
+    say("Ignorando ", n_copc, " arquivo(s) .copc.laz (lasR nao abre COPC).")
+  }
+  if (!length(files)) return(list(dt = vazio, n_dup = 0L))
   files_dt <- data.table::data.table(laz_path = files)
   files_dt[, laz_nome := basename(laz_path)]
   files_dt[, tile_id := toupper(tools::file_path_sans_ext(laz_nome))]
@@ -790,6 +798,11 @@ load_laz_index <- function(path, meta_path, laz_dir) {
   dt[, tamanho_mb := suppressWarnings(as.numeric(tamanho_mb))]
   dt[, tile_id := toupper(trimws(tile_id))]
   dt <- dt[nzchar(tile_id) & nzchar(laz_path)]
+  n_copc <- sum(grepl("\\.copc\\.laz$", dt$laz_path, ignore.case = TRUE))
+  if (n_copc > 0L) {
+    say("Indice tinha ", n_copc, " .copc.laz; removidos da fila (lasR nao abre COPC).")
+    dt <- dt[!grepl("\\.copc\\.laz$", laz_path, ignore.case = TRUE)]
+  }
   n_dup <- suppressWarnings(as.integer(meta$n_dup[[1]]))
   if (is.na(n_dup)) n_dup <- 0L
   say("Indice de LAZ da primeira leitura: ", nrow(dt), " tile(s). O tamanho nao sera lido de novo.")
@@ -1440,6 +1453,11 @@ run_one <- function(src, opt, paths, inbox, metadata) {
   dir.create(paths$logs, recursive = TRUE, showWarnings = FALSE)
   wipe_dir_contents(paths$tmp)
   logfile <- file.path(paths$logs, paste0(toupper(stem), "_issues.csv"))
+  if (file.exists(logfile)) unlink(logfile)
+  if (dir.exists(out_tile)) {
+    old_err <- list.files(out_tile, pattern = "^_ERROR\\.txt$", recursive = TRUE, full.names = TRUE)
+    if (length(old_err)) unlink(old_err)
+  }
   t0 <- Sys.time()
   status <- tryCatch(
     process.dataset(
