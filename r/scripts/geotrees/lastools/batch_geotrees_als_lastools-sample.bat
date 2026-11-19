@@ -9,9 +9,10 @@ REM  Edite aqui. O resto pode ir na linha de comando.
 REM  BLOCO vazio = todos os .laz/.las da pasta.
 REM  Um bloco:    set "BLOCO=EF"
 REM  Dois blocos: set "BLOCO=EF,2024"
-REM  ARTICULACAO vazio = data\articulacao_igc_sp\
-REM  articulacao-igc-merged-spatialindex-sirgas2000.gpkg
-REM  dentro do clone do repositorio.
+REM  ARTICULACAO vazio = data\articulacao_igc_sp\ no clone (obrigatoria).
+REM  O campo epsg da articulacao define o CRS do tile:
+REM    31983 -> EPSG:32723 | 31982 -> EPSG:32722
+REM  Metadata GCA fica inline no .R (nao precisa de _GCA_metadata.csv).
 REM  MAX_HOURS vazio = 24. Ex.: set "MAX_HOURS=8"
 REM =====================================================================
 set "LAZ_DIR=D:\laz"
@@ -42,10 +43,10 @@ echo  GPKG    : %OUT_DIR%\geotrees_als_registro.gpkg
 echo  CSV     : %OUT_DIR%\geotrees_als_registry.csv
 echo  MD      : %OUT_DIR%\geotrees_als_relatorio.md
 echo.
+echo  Metadata GCA: inline. CRS por tile via articulacao.epsg.
+echo  31983-^>32723 | 31982-^>32722. Mistura: um fuso inteiro, depois o outro.
 echo  Pula tile que ja tem _INFO_summary_processing.csv nesta saida.
 echo  Se parar no meio, rode de novo: continua do que falta.
-echo  O .laz interrompido comeca de novo; os que ja terminaram nao.
-echo  A cada arquivo a previsao do que falta e recalculada (dias, horas, minutos).
 echo  Erro entra de novo na proxima rodada. --force refaz tudo.
 echo  Teste sem processar:  --dry-run     ou  --list-blocos
 echo  So o relatorio:       --report-only
