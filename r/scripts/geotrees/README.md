@@ -104,6 +104,8 @@ Extra variables in the sample `.bat`:
 | `PATH_LASTOOLS` | `C:\LAStools\bin` | LAStools `bin` folder. |
 | `MAX_HOURS` | empty → `24` | Stop between tiles after this many hours. |
 
+Put `ALS_MACHINE_TOKEN` inside the local `.bat` with `set "ALS_MACHINE_TOKEN=..."`. You do not need a Windows system environment variable. Do not pass the token on the Rscript command line (that made the window close instantly). The R process inherits the variable from the `.bat`.
+
 GCA metadata is **inline** in the R wrapper (no `_GCA_metadata.csv` required). Per-tile `acq_crs` comes from the articulation `epsg` field:
 
 | Articulation `epsg` | Processing CRS |
