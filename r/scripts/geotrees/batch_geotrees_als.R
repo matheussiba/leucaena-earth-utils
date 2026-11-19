@@ -29,7 +29,7 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.3.2"
+VERSION <- "1.3.3"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -336,13 +336,14 @@ install_pkg <- function(pkg) {
 need_pkgs <- function(pkgs, para_que = "") {
   pkgs <- unique(pkgs)
   anunciar <- nzchar(para_que)
-  if (anunciar) say(
+  dbg <- isTRUE(getOption("geotrees.debug", FALSE))
+  if (anunciar && dbg) say(
     "Conferindo pacotes R (", para_que, "), antes de varrer LAZ ou carregar o pipeline:"
   )
   miss <- character()
   for (pkg in pkgs) {
     if (requireNamespace(pkg, quietly = TRUE)) {
-      if (anunciar) say("  ok    ", pkg)
+      if (anunciar && dbg) say("  ok    ", pkg)
     } else {
       say("  FALTA ", pkg)
       miss <- c(miss, pkg)
@@ -371,7 +372,8 @@ need_pkgs <- function(pkgs, para_que = "") {
     }
     say("Pacotes que faltavam foram instalados.")
   }
-  if (anunciar) say("Pacotes conferidos: ", length(pkgs), ".")
+  if (anunciar && dbg) say("Pacotes conferidos: ", length(pkgs), ".")
+  else if (anunciar) say("Pacotes R ok (", length(pkgs), ").")
 }
 
 atomic_write <- function(path, write_fn) {
@@ -559,9 +561,9 @@ read_artic_table <- function(path, layer) {
     ),
     layer
   )
-  say("Consultando a tabela da articulacao (SQLite, somente leitura)...")
+  say_debug("Consultando a tabela da articulacao (SQLite, somente leitura)...")
   tab <- DBI::dbGetQuery(con, sql)
-  say("Tabela lida: ", nrow(tab), " linha(s).")
+  say_debug("Tabela lida: ", nrow(tab), " linha(s).")
   tab
 }
 
@@ -915,7 +917,7 @@ fill_laz_from_plan <- function(registry, plan) {
 
 list_lidar <- function(root, out_dir) {
   say("Listando .laz/.las em ", root)
-  say("A pasta inteira e percorrida antes do filtro de BLOCO. Cada pasta aparece abaixo.")
+  say_debug("A pasta inteira e percorrida antes do filtro de BLOCO. Cada pasta aparece abaixo.")
   root_n <- normalizePath(root, winslash = "/", mustWork = TRUE)
   root_out <- normalizePath(out_dir, winslash = "/", mustWork = FALSE)
   skip_prefix <- tolower(paste0(root_out, "/"))
@@ -929,7 +931,7 @@ list_lidar <- function(root, out_dir) {
     i <- i + 1L
     if (tolower(d) == tolower(root_out) || startsWith(tolower(d), skip_prefix)) next
     n_dirs <- n_dirs + 1L
-    say("  [pasta ", n_dirs, "] lendo nomes em ", d)
+    say_debug("  [pasta ", n_dirs, "] lendo nomes em ", d)
     here <- list.files(
       d, pattern = "\\.(laz|las)$", recursive = FALSE,
       full.names = TRUE, ignore.case = TRUE
@@ -942,28 +944,28 @@ list_lidar <- function(root, out_dir) {
     }
     n_here <- 0L
     if (length(here)) {
-      say("      normalizando ", length(here), " caminho(s)...")
+      say_debug("      normalizando ", length(here), " caminho(s)...")
       here <- normalizePath(here, winslash = "/", mustWork = TRUE)
       here <- here[!startsWith(tolower(here), skip_prefix)]
       n_here <- length(here)
       if (n_here) {
         found[[length(found) + 1L]] <- here
         n_found <- n_found + n_here
-        say("      ultimo desta pasta: ", basename(here[[n_here]]))
+        say_debug("      ultimo desta pasta: ", basename(here[[n_here]]))
       }
     }
-    say(
+    say_debug(
       "      ", n_here, " arquivo(s) aqui | ", n_found, " no total | ",
       length(kids), " subpasta(s) a seguir"
     )
   }
-  say("Varredura terminou: ", n_found, " arquivo(s) .laz/.las em ", n_dirs, " pasta(s).")
+  say("Varredura: ", n_found, " arquivo(s) .laz/.las em ", n_dirs, " pasta(s).")
   if (!n_found) return(character())
   unlist(found, use.names = FALSE)
 }
 
 dedupe_lidar <- function(files) {
-  say("Montando o inventario: ", length(files), " arquivo(s).")
+  say("Inventario: ", length(files), " arquivo(s).")
   vazio <- data.table::data.table(
     laz_path = character(), laz_nome = character(),
     tile_id = character(), tamanho_mb = numeric()
@@ -982,13 +984,13 @@ dedupe_lidar <- function(files) {
   files_dt[, tile_id := toupper(tools::file_path_sans_ext(laz_nome))]
   n <- nrow(files_dt)
   sizes <- numeric(n)
-  say("Lendo o tamanho de cada arquivo para descartar duplicata menor. Isso so ocorre na primeira vez.")
+  say_debug("Lendo o tamanho de cada arquivo para descartar duplicata menor. Isso so ocorre na primeira vez.")
   chunk <- 200L
   for (i in seq.int(1L, n, by = chunk)) {
     j <- min(n, i + chunk - 1L)
     info <- file.info(files_dt$laz_path[i:j])
     sizes[i:j] <- ifelse(is.na(info$size), 0, info$size)
-    say("  tamanhos ", j, "/", n, " | ", files_dt$laz_nome[[j]])
+    say_debug("  tamanhos ", j, "/", n, " | ", files_dt$laz_nome[[j]])
   }
   files_dt[, tamanho_bytes := sizes]
   data.table::setorder(files_dt, tile_id, -tamanho_bytes)
@@ -1728,20 +1730,42 @@ issue_text <- function(logfile) {
   clip_err(txt, 1200)
 }
 
+quiet_wrap_cmd <- function(command, intern = FALSE) {
+  if (isTRUE(intern)) return(command)
+  cmd <- as.character(command[[1]])
+  if (.Platform$OS.type == "windows") {
+    # CreateProcess ignores >nul unless the command runs under cmd.exe.
+    if (grepl("^\\s*cmd\\s+/c\\b", cmd, ignore.case = TRUE) &&
+        grepl(">nul\\s+2>&1|>NUL\\s+2>&1", cmd, ignore.case = TRUE)) {
+      return(cmd)
+    }
+    inner <- paste(cmd, ">nul 2>&1")
+    return(paste("cmd /c", shQuote(inner, type = "cmd")))
+  }
+  if (grepl(">/dev/null", cmd, fixed = TRUE)) return(cmd)
+  paste(cmd, ">/dev/null 2>&1")
+}
+
 install_quiet_system <- function(debug = FALSE) {
   options(geotrees.debug = isTRUE(debug))
   if (isTRUE(debug)) {
     if (exists("system", envir = globalenv(), inherits = FALSE)) {
       rm("system", envir = globalenv())
     }
+    if (exists("system2", envir = globalenv(), inherits = FALSE)) {
+      rm("system2", envir = globalenv())
+    }
     return(invisible(FALSE))
   }
+  # Override system()/system2() used by the official helper so LAStools spam
+  # never hits the console (cmd.exe redirect; show.output.on.console is not enough).
   assign("system", function(command, intern = FALSE, wait = TRUE, input = NULL,
                             show.output.on.console = TRUE, minimized = FALSE,
                             invisible = TRUE, timeout = 0, ...) {
+    cmd <- quiet_wrap_cmd(command, intern = intern)
     if (.Platform$OS.type == "windows") {
       return(base::system(
-        command,
+        cmd,
         intern = intern,
         wait = wait,
         input = input,
@@ -1752,8 +1776,13 @@ install_quiet_system <- function(debug = FALSE) {
         ...
       ))
     }
-    cmd <- if (intern) command else paste(command, ">/dev/null 2>&1")
     base::system(cmd, intern = intern, wait = wait, input = input, timeout = timeout, ...)
+  }, envir = globalenv())
+  assign("system2", function(command, args = character(),
+                             stdout = "", stderr = "", ...) {
+    if (is.null(stdout) || identical(stdout, "")) stdout <- FALSE
+    if (is.null(stderr) || identical(stderr, "")) stderr <- FALSE
+    base::system2(command, args = args, stdout = stdout, stderr = stderr, ...)
   }, envir = globalenv())
   invisible(TRUE)
 }
