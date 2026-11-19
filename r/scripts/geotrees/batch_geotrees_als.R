@@ -26,7 +26,7 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.1.0"
+VERSION <- "1.2.0"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -82,7 +82,14 @@ default_opt <- function() {
     name_job = "igc",
     use_blast2dem = TRUE,
     force_utm = "from_metadata",
-    metadata = ""
+    metadata = "",
+    als_api = NA,
+    als_api_url = "https://leucaena.earth",
+    als_api_token = "",
+    als_report_every = 5L,
+    als_lease_seconds = 7200L,
+    als_allow_retry = TRUE,
+    als_soft_fail = FALSE
   )
 }
 
@@ -90,12 +97,14 @@ parse_cli <- function(argv) {
   opt <- default_opt()
   bools <- c(
     "--force", "--dry-run", "--report-only", "--list-blocos", "--help",
-    "--no-blast"
+    "--no-blast", "--als-api", "--no-als-api", "--als-allow-retry",
+    "--als-soft-fail"
   )
   valued <- c(
     "--laz-dir", "--bloco", "--out-dir", "--articulacao", "--articulacao-layer",
     "--n-cores", "--resolution", "--size-tile", "--size-buffer", "--limit",
-    "--name-job", "--metadata", "--force-utm"
+    "--name-job", "--metadata", "--force-utm",
+    "--als-api-url", "--als-api-token", "--als-report-every", "--als-lease-seconds"
   )
   i <- 1L
   while (i <= length(argv)) {
@@ -130,6 +139,26 @@ parse_cli <- function(argv) {
       i <- i + 1L
       next
     }
+    if (a == "--als-api") {
+      opt$als_api <- TRUE
+      i <- i + 1L
+      next
+    }
+    if (a == "--no-als-api") {
+      opt$als_api <- FALSE
+      i <- i + 1L
+      next
+    }
+    if (a == "--als-allow-retry") {
+      opt$als_allow_retry <- TRUE
+      i <- i + 1L
+      next
+    }
+    if (a == "--als-soft-fail") {
+      opt$als_soft_fail <- TRUE
+      i <- i + 1L
+      next
+    }
     if (!a %in% valued) {
       stop(
         "Argumento desconhecido: ", a,
@@ -153,6 +182,10 @@ parse_cli <- function(argv) {
     if (a == "--name-job") opt$name_job <- val
     if (a == "--metadata") opt$metadata <- val
     if (a == "--force-utm") opt$force_utm <- val
+    if (a == "--als-api-url") opt$als_api_url <- val
+    if (a == "--als-api-token") opt$als_api_token <- val
+    if (a == "--als-report-every") opt$als_report_every <- as.integer(num_arg(val, a))
+    if (a == "--als-lease-seconds") opt$als_lease_seconds <- as.integer(num_arg(val, a))
   }
   opt$force_utm <- normalize_force_utm(opt$force_utm)
   if (!is.na(opt$n_cores) && opt$n_cores < 1L) {
@@ -162,6 +195,18 @@ parse_cli <- function(argv) {
     stop("resolution, size-tile e size-buffer invalidos.", call. = FALSE)
   }
   if (opt$limit < 0L) stop("--limit precisa ser >= 0.", call. = FALSE)
+  if (!nzchar(trimws(opt$als_api_token))) {
+    opt$als_api_token <- Sys.getenv("ALS_MACHINE_TOKEN", "")
+  }
+  if (is.na(opt$als_api)) opt$als_api <- nzchar(trimws(opt$als_api_token))
+  if (isTRUE(opt$als_api) && !nzchar(trimws(opt$als_api_token))) {
+    stop(
+      "ALS API ligada sem token. Defina ALS_MACHINE_TOKEN ou --als-api-token.",
+      call. = FALSE
+    )
+  }
+  if (is.na(opt$als_report_every) || opt$als_report_every < 1L) opt$als_report_every <- 5L
+  if (is.na(opt$als_lease_seconds) || opt$als_lease_seconds < 60L) opt$als_lease_seconds <- 7200L
   opt
 }
 
@@ -212,6 +257,16 @@ help_text <- function() {
     "CRS: metadata GCA fica inline. acq_crs por tile via articulacao.epsg:",
     "  31983 -> overwrite.with:EPSG:32723 | 31982 -> overwrite.with:EPSG:32722",
     "Pasta com os dois fusos: processa um grupo EPSG inteiro, depois o outro.",
+    "",
+    "API leucaena.earth (multi-PC):",
+    "  Liga sozinha se ALS_MACHINE_TOKEN estiver no ambiente.",
+    "  --als-api / --no-als-api",
+    "  --als-api-url URL       Padrao https://leucaena.earth",
+    "  --als-api-token TOK    Ou env ALS_MACHINE_TOKEN",
+    "  --als-report-every N   Flush a cada N tiles (padrao 5)",
+    "  --als-lease-seconds N  Lease do claim (padrao 7200)",
+    "  --als-allow-retry      Recclaima status 2 (padrao ligado)",
+    "  --als-soft-fail        Se a API cair, processa sem claim",
     "Parar no meio: crie PARAR.txt em OUT_DIR (a checagem e entre tiles).",
     "A primeira rodada grava o indice dos .laz e o da articulacao em OUT_DIR.",
     "As seguintes reutilizam esses arquivos. Para reler a pasta, apague geotrees_als_laz_indice.csv.",
@@ -1967,6 +2022,19 @@ main <- function() {
     return(0L)
   }
 
+  source(file.path(dir_script, "als_registry_api.R"), local = FALSE)
+  als <- als_cfg(opt, pipeline = "opensource")
+  pending_als <- list()
+  if (als$enabled) {
+    say(
+      "ALS API: ", als$url,
+      " | claim por tile | report a cada ", als$report_every,
+      " | lease ", als$lease_seconds, "s"
+    )
+    als_upsert_plan(als, plan, say_fn = say)
+  } else {
+    say("ALS API: desligada (sem ALS_MACHINE_TOKEN / --no-als-api).")
+  }
   source_helper(file.path(dir_script, "ALS_processing_helperfunctions.R"))
   say("Metadata GCA: inline (acq_crs por tile via articulacao).")
   meta_base <- NULL
@@ -2049,6 +2117,13 @@ main <- function() {
         epsg_proc = meta$epsg_proc,
         out_dir = paths$root
       ))
+      if (als$enabled) {
+        pending_als <- als_buffer_push(
+          als, pending_als,
+          als_result_payload(row, 4L, als$pipeline, paths$root),
+          say_fn = say
+        )
+      }
       next
     }
     if (is.na(epsg_atual) || epsg_atual != meta$epsg_proc) {
@@ -2085,6 +2160,23 @@ main <- function() {
           if (nzchar(eta_antes$previsao)) eta_antes$previsao else "-"
         )
       )
+    }
+    if (als$enabled) {
+      claim <- als_claim_one(als, meta$tile_id, maquina(), usuario())
+      if (!isTRUE(claim$claimed)) {
+        say("ALS claim pulou ", meta$tile_id, ": ", claim$reason)
+        log_line(paths$runlog, sprintf("[%d/%d] PULADO (API) %s | %s", i, n_fila, meta$tile_id, claim$reason))
+        next
+      }
+      if (!isTRUE(claim$ok) && isTRUE(claim$soft)) {
+        say("AVISO ALS claim soft-fail; processando mesmo assim: ", claim$reason)
+      } else if (!isTRUE(claim$ok)) {
+        n_erro_run <- n_erro_run + 1L
+        say("FALHOU claim ", meta$tile_id, ": ", claim$reason)
+        next
+      } else {
+        say("ALS claim ok: ", meta$tile_id)
+      }
     }
     log_line(
       paths$runlog,
@@ -2161,6 +2253,13 @@ main <- function() {
       })
     }
     write_md(if (parou) "parado" else "rodada")
+    if (als$enabled) {
+      pending_als <- als_buffer_push(
+        als, pending_als,
+        als_result_payload(row, als_status_from_local(status), als$pipeline, paths$root),
+        say_fn = say
+      )
+    }
     faltam_depois <- n_fila - i
     mostrar_eta(rodada, registry, faltam_depois, este_min = result$minutos)
     log_line(
@@ -2174,6 +2273,11 @@ main <- function() {
       )
     )
     gc(verbose = FALSE)
+  }
+
+  if (als$enabled && length(pending_als)) {
+    say("ALS flush final: ", length(pending_als), " tile(s)...")
+    als_report_flush(als, pending_als, say_fn = say)
   }
 
   if (artic_ok && nrow(registry)) {
