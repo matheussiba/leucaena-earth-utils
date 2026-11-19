@@ -87,6 +87,8 @@ The time estimate is printed after each finished tile. It is the mean of success
 
 ## leucaena.earth ALS API (multi-PC)
 
+Set `DEBUG=false` in the local `.bat` (default) for a quiet console: main steps + progress bar; pipeline spam goes to `OUT_DIR\logs\<TILE>_pipeline.log`. Use `DEBUG=true` or `--debug` for the full LAStools/open-source verbose stream.
+
 Both `batch_geotrees_als.R` and `batch_geotrees_als_lastools.R` can coordinate tiles through the [leucaena.earth](https://leucaena.earth) ALS registry. When `ALS_MACHINE_TOKEN` is set (or you pass `--als-api-token`), the batch upserts the plan, **claims** each tile before processing (`3`), and **reports** terminal outcomes immediately (`1` / `2` / `4`). Status **`1` is only sent after products exist under `processed/<utm>/<tile>/`** (`_INFO_summary_processing.csv`, no `_ERROR.txt`). Sync tiles already at `1` are never downgraded by the API. To clear failed/stuck tiles from an old run without touching successes: `als_reset_non_ok.R --hostname RSPC-001`.
 
 ## LAStools variant

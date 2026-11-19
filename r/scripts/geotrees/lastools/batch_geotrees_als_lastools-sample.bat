@@ -36,6 +36,10 @@ set "LIMIT="
 set "ALS_API_URL=https://leucaena.earth"
 set "ALS_REPORT_EVERY=5"
 
+REM true = verbose do pipeline (retilagem tile a tile etc.)
+REM false = so andamento principal + barra de progresso (recomendado)
+set "DEBUG=false"
+
 REM >>> COLE O TOKEN DO RENDER AQUI (entre as aspas). Vazio = API desligada.
 set "ALS_MACHINE_TOKEN="
 
@@ -57,7 +61,8 @@ if "!ALS_MACHINE_TOKEN!"=="" (
   echo  Token   : definido no .bat ^(nao exibido^)
 )
 echo  Report  : a cada %ALS_REPORT_EVERY% tile(s)
-echo  Produtos: %OUT_DIR%\processed\^<tile^>
+echo  Debug   : %DEBUG%
+echo  Produtos: %OUT_DIR%\processed\22^|23\^<tile^>
 echo ============================================================
 echo.
 
@@ -109,6 +114,10 @@ set "LASTOOLS_ARG=--path-lastools "%PATH_LASTOOLS%""
 set "HOURS_ARG=--max-hours %MAX_HOURS%"
 set "ALS_URL_ARG=--als-api-url "%ALS_API_URL%""
 set "ALS_REP_ARG=--als-report-every %ALS_REPORT_EVERY%"
+set "DEBUG_ARG=--no-debug"
+if /I "%DEBUG%"=="true" set "DEBUG_ARG=--debug"
+if /I "%DEBUG%"=="1" set "DEBUG_ARG=--debug"
+if /I "%DEBUG%"=="yes" set "DEBUG_ARG=--debug"
 if defined BLOCO set "BLOCO_ARG=--bloco %BLOCO%"
 if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
 if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
@@ -116,10 +125,10 @@ if defined ARTICULACAO set "ARTIC_ARG=--articulacao "%ARTICULACAO%""
 
 REM Token so no ambiente deste .bat (set acima). Nao passa --als-api-token.
 echo Comando:
-echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %*
+echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %*
 echo.
 
-"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.

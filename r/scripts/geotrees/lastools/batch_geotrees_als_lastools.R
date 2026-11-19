@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.1-lastools"
+VERSION <- "1.3.2-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -83,7 +83,8 @@ default_opt <- function() {
     als_report_every = 5L,
     als_lease_seconds = 7200L,
     als_allow_retry = TRUE,
-    als_soft_fail = FALSE
+    als_soft_fail = FALSE,
+    debug = FALSE
   )
 }
 
@@ -92,7 +93,7 @@ parse_cli <- function(argv) {
   bools <- c(
     "--force", "--dry-run", "--report-only", "--list-blocos", "--help",
     "--no-blast", "--als-api", "--no-als-api", "--als-allow-retry",
-    "--als-soft-fail"
+    "--als-soft-fail", "--debug", "--no-debug"
   )
   valued <- c(
     "--laz-dir", "--bloco", "--out-dir", "--articulacao", "--articulacao-layer",
@@ -153,6 +154,16 @@ parse_cli <- function(argv) {
       i <- i + 1L
       next
     }
+    if (a == "--debug") {
+      opt$debug <- TRUE
+      i <- i + 1L
+      next
+    }
+    if (a == "--no-debug") {
+      opt$debug <- FALSE
+      i <- i + 1L
+      next
+    }
     if (!a %in% valued) {
       stop(
         "Argumento desconhecido: ", a,
@@ -206,7 +217,20 @@ parse_cli <- function(argv) {
   }
   if (is.na(opt$als_report_every) || opt$als_report_every < 1L) opt$als_report_every <- 5L
   if (is.na(opt$als_lease_seconds) || opt$als_lease_seconds < 60L) opt$als_lease_seconds <- 7200L
+  # DEBUG=true|false in bat/env overrides default unless CLI set --debug/--no-debug
+  env_dbg <- Sys.getenv("GEOTREES_DEBUG", Sys.getenv("DEBUG", ""))
+  if (nzchar(env_dbg) && !any(argv %in% c("--debug", "--no-debug"))) {
+    opt$debug <- parse_bool_loose(env_dbg, default = FALSE)
+  }
   opt
+}
+
+parse_bool_loose <- function(val, default = FALSE) {
+  key <- tolower(trimws(as.character(val[[1]])))
+  if (!nzchar(key)) return(default)
+  if (key %in% c("1", "true", "t", "yes", "y", "sim")) return(TRUE)
+  if (key %in% c("0", "false", "f", "no", "n", "nao", "não")) return(FALSE)
+  default
 }
 
 num_arg <- function(val, nome) {
@@ -268,6 +292,7 @@ help_text <- function() {
     "  --als-lease-seconds N  Lease do claim (padrao 7200)",
     "  --als-allow-retry      Recclaima status 2 (padrao ligado)",
     "  --als-soft-fail        Se a API cair, processa sem claim",
+    "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
     "Parar no meio: PARAR.txt em OUT_DIR. --max-hours tambem para entre tiles."
   )
 }
@@ -733,7 +758,8 @@ prune_incomplete_processed <- function(dir_processed) {
 
 scan_done <- function(dir_processed, known_ids = character()) {
   vazio <- data.table::data.table(tile_id = character(), pasta_saida = character(), finalizado_utc = character())
-  say("Procurando tiles ja prontos em ", dir_processed, " (pastas 22/23 e legado)")
+  say("Procurando tiles ja prontos em processed/ ...")
+  say_debug("Procurando em ", dir_processed, " (pastas 22/23 e legado)")
   if (!dir.exists(dir_processed)) {
     say("  A pasta de produtos ainda nao existe. Nenhum tile pronto.")
     return(vazio)
@@ -747,7 +773,7 @@ scan_done <- function(dir_processed, known_ids = character()) {
   if (length(known_ids)) {
     for (id in unique(known_ids)) if (nzchar(id)) known[[id]] <- TRUE
   }
-  say("  ", length(kids), " pasta(s) na saida. ", length(ls(known)), " ja estao no registro e nao serao abertas de novo.")
+  say("  ", length(kids), " pasta(s) na saida. ", length(ls(known)), " ja no registro.")
   rows <- vector("list", length(kids))
   n <- 0L
   n_fast <- 0L
@@ -765,16 +791,16 @@ scan_done <- function(dir_processed, known_ids = character()) {
         finalizado_utc = ""
       )
       if (n_fast == 1L || n_fast %% 500L == 0L) {
-        say("  pasta ja registrada ", n_fast, ": ", id)
+        say_debug("  pasta ja registrada ", n_fast, ": ", id)
       }
       next
     }
     n_open <- n_open + 1L
-    say("  abrindo pasta nova ", id, " (", i, "/", length(kids), ")")
+    say_debug("  abrindo pasta nova ", id, " (", i, "/", length(kids), ")")
     info <- list.files(k, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE, full.names = TRUE)
     err <- list.files(k, pattern = "^_ERROR\\.txt$", recursive = TRUE)
     if (!length(info) || length(err)) {
-      say("      ainda nao conta como pronto.")
+      say_debug("      ainda nao conta como pronto.")
       next
     }
     mt <- file.info(info[[1]])$mtime
@@ -784,9 +810,9 @@ scan_done <- function(dir_processed, known_ids = character()) {
       pasta_saida = normalizePath(k, winslash = "/"),
       finalizado_utc = format(mt, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
     )
-    say("      pronto. Adotado do disco.")
+    say_debug("      pronto. Adotado do disco.")
   }
-  say("Tiles prontos no disco: ", n, " | reaproveitados do registro: ", n_fast, " | pastas abertas agora: ", n_open, ".")
+  say("Tiles prontos no disco: ", n, " | do registro: ", n_fast, " | pastas novas abertas: ", n_open, ".")
   if (!n) return(vazio)
   data.table::rbindlist(rows[seq_len(n)])
 }
@@ -1623,11 +1649,11 @@ link_into_inbox <- function(src, inbox, type_file) {
   dest <- file.path(inbox, paste0(stem, ".", type_file))
   ok <- suppressWarnings(file.link(src, dest))
   if (isTRUE(ok) && file.exists(dest)) {
-    say("Atalho do LAZ: ", dest)
+    say_debug("Atalho do LAZ: ", dest)
     return(dest)
   }
   if (file.exists(dest)) unlink(dest, force = TRUE)
-  say("Copiando o LAZ para a saida: ", src)
+  say_debug("Copiando o LAZ para a saida: ", src)
   ok <- file.copy(src, dest, overwrite = TRUE, copy.date = TRUE)
   if (!isTRUE(ok) || !file.exists(dest)) {
     stop(
@@ -1635,7 +1661,7 @@ link_into_inbox <- function(src, inbox, type_file) {
       call. = FALSE
     )
   }
-  say("Copia pronta: ", dest)
+  say_debug("Copia pronta: ", dest)
   dest
 }
 
@@ -1654,8 +1680,10 @@ kill_stray_lastools <- function() {
     "lasindex", "lasmerge", "lassplit", "lasvoxel"
   )
   for (e in exes) {
+    # Mute "ERROR: The process ... not found" when nothing is running.
     suppressWarnings(try(
-      system(sprintf("taskkill /F /IM %s.exe /T", e), intern = TRUE),
+      system2("taskkill", c("/F", "/IM", paste0(e, ".exe"), "/T"),
+              stdout = FALSE, stderr = FALSE),
       silent = TRUE
     ))
   }
@@ -1716,22 +1744,90 @@ issue_text <- function(logfile) {
   clip_err(txt, 1200)
 }
 
-source_helper <- function(path) {
+install_quiet_system <- function(debug = FALSE) {
+  options(geotrees.debug = isTRUE(debug))
+  if (isTRUE(debug)) {
+    if (exists("system", envir = globalenv(), inherits = FALSE)) {
+      rm("system", envir = globalenv())
+    }
+    return(invisible(FALSE))
+  }
+  # Override system() used by the official helper so LAStools tile spam stays in the log.
+  assign("system", function(command, intern = FALSE, wait = TRUE, input = NULL,
+                            show.output.on.console = TRUE, minimized = FALSE,
+                            invisible = TRUE, timeout = 0, ...) {
+    if (.Platform$OS.type == "windows") {
+      return(base::system(
+        command,
+        intern = intern,
+        wait = wait,
+        input = input,
+        show.output.on.console = FALSE,
+        minimized = minimized,
+        invisible = invisible,
+        timeout = timeout,
+        ...
+      ))
+    }
+    cmd <- if (intern) command else paste(command, ">/dev/null 2>&1")
+    base::system(cmd, intern = intern, wait = wait, input = input, timeout = timeout, ...)
+  }, envir = globalenv())
+  invisible(TRUE)
+}
+
+with_pipeline_output <- function(expr, log_file, debug = FALSE) {
+  if (isTRUE(debug)) return(force(expr))
+  dir.create(dirname(log_file), recursive = TRUE, showWarnings = FALSE)
+  con <- file(log_file, open = "wt", encoding = "UTF-8")
+  sink(con, type = "output")
+  sink(con, type = "message")
+  on.exit({
+    try(sink(type = "message"), silent = TRUE)
+    try(sink(type = "output"), silent = TRUE)
+    try(close(con), silent = TRUE)
+  }, add = TRUE)
+  force(expr)
+}
+
+progress_bar <- function(i, n, label = "", width = 28L) {
+  if (n <= 0) n <- 1L
+  i <- max(0L, min(as.integer(i), as.integer(n)))
+  pct <- i / n
+  filled <- as.integer(round(pct * width))
+  bar <- paste0(
+    strrep("=", filled),
+    if (filled < width) ">" else "",
+    strrep(" ", max(0L, width - filled - 1L))
+  )
+  msg <- sprintf("\r[%s] %3.0f%%  %d/%d  %s", bar, 100 * pct, i, n, label)
+  cat(msg)
+  flush.console()
+  invisible()
+}
+
+progress_done <- function() {
+  cat("\n")
+  flush.console()
+}
+
+source_helper <- function(path, debug = FALSE) {
   if (!file.exists(path)) {
     stop("Nao achei o pipeline oficial: ", path, call. = FALSE)
   }
-  say("Carregando o pipeline oficial do GeoTrees. Os pacotes ja foram conferidos no inicio.")
-  say("  ", path)
+  say("Carregando o pipeline oficial do GeoTrees.")
+  say_debug("  ", path)
   suppressPackageStartupMessages(sys.source(path, envir = globalenv()))
   if (!exists("process.dataset", mode = "function", envir = globalenv())) {
     stop("process.dataset nao apareceu depois de carregar o helper.", call. = FALSE)
   }
-  say("Pipeline GeoTrees carregado.")
+  install_quiet_system(debug = debug)
+  say("Pipeline GeoTrees carregado.", if (isTRUE(debug)) " (DEBUG=on)" else " (saida quieta; use --debug para verbose)")
 }
 
 run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   ext <- tolower(tools::file_ext(src))
   type_file <- if (ext %in% c("laz", "las")) ext else "laz"
+  say("  [1/4] Preparando LAZ no inbox...")
   dest <- link_into_inbox(src, inbox, type_file)
   stem <- tools::file_path_sans_ext(basename(dest))
   zone <- utm_zone_folder(epsg_proc)
@@ -1746,7 +1842,9 @@ run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   wipe_dir_contents(staging_root)
   dir.create(staging_root, recursive = TRUE, showWarnings = FALSE)
   logfile <- file.path(paths$logs, paste0(toupper(stem), "_issues.csv"))
+  pipe_log <- file.path(paths$logs, paste0(toupper(stem), "_pipeline.log"))
   if (file.exists(logfile)) unlink(logfile)
+  if (file.exists(pipe_log)) unlink(pipe_log)
   # Limit BLAS threads so n_cores LAStools/R workers do not OOM on DSM steps.
   Sys.setenv(
     OPENBLAS_NUM_THREADS = "1",
@@ -1755,36 +1853,45 @@ run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
     VECLIB_MAXIMUM_THREADS = "1",
     NUMEXPR_NUM_THREADS = "1"
   )
+  say(
+    "  [2/4] Pipeline GeoTrees/LAStools em andamento",
+    if (isTRUE(opt$debug)) "..." else paste0(" (log: ", pipe_log, ")...")
+  )
   t0 <- Sys.time()
   status <- tryCatch(
-    process.dataset(
-      name_job = opt$name_job,
-      type_file = type_file,
-      dir_dataset = inbox,
-      dir_processed = staging_root,
-      tmpdir_processing = paths$tmp,
-      path_lastools = opt$path_lastools,
-      metadata = metadata,
-      resolution = opt$resolution,
-      n_cores = opt$n_cores,
-      size_tile = opt$size_tile,
-      size_buffer = opt$size_buffer,
-      force.utm = opt$force_utm,
-      remove.vlr = TRUE,
-      remove.evlr = TRUE,
-      type_architecture = "64",
-      use.blast2dem = opt$use_blast2dem,
-      patterns_skip = character(),
-      cleanup = TRUE,
-      retile = "include.adjacents",
-      by_file = TRUE,
-      force.recompute = isTRUE(opt$force),
-      print.summary_job = FALSE,
-      logfile = logfile
+    with_pipeline_output(
+      process.dataset(
+        name_job = opt$name_job,
+        type_file = type_file,
+        dir_dataset = inbox,
+        dir_processed = staging_root,
+        tmpdir_processing = paths$tmp,
+        path_lastools = opt$path_lastools,
+        metadata = metadata,
+        resolution = opt$resolution,
+        n_cores = opt$n_cores,
+        size_tile = opt$size_tile,
+        size_buffer = opt$size_buffer,
+        force.utm = opt$force_utm,
+        remove.vlr = TRUE,
+        remove.evlr = TRUE,
+        type_architecture = "64",
+        use.blast2dem = opt$use_blast2dem,
+        patterns_skip = character(),
+        cleanup = TRUE,
+        retile = "include.adjacents",
+        by_file = TRUE,
+        force.recompute = isTRUE(opt$force),
+        print.summary_job = FALSE,
+        logfile = logfile
+      ),
+      log_file = pipe_log,
+      debug = isTRUE(opt$debug)
     ),
     error = function(e) e
   )
   minutos <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  say(sprintf("  [3/4] Pipeline terminou em %s", format_dhm(minutos)))
   kill_stray_lastools()
   unlink(dest)
   detalhe <- issue_text(logfile)
@@ -1792,6 +1899,9 @@ run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
     if (dir.exists(out_staging)) unlink(out_staging, recursive = TRUE, force = TRUE)
     if (nzchar(detalhe)) erro <- paste0(erro, " | ", detalhe)
     if (nzchar(logfile)) erro <- paste0(erro, " | log: ", logfile)
+    if (!isTRUE(opt$debug) && file.exists(pipe_log)) {
+      erro <- paste0(erro, " | pipeline_log: ", pipe_log)
+    }
     list(ok = FALSE, erro = clip_err(erro, 1200), minutos = minutos, pasta_saida = "")
   }
   if (inherits(status, "error")) {
@@ -1804,6 +1914,7 @@ run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   if (!check$ok) {
     return(finish_fail(check$erro))
   }
+  say("  [4/4] Promovendo para processed/", zone, "/", stem, "...")
   if (!promote_tile_dir(out_staging, out_final)) {
     return(finish_fail(paste0("tile ok no staging mas falhou ao promover para processed/", zone)))
   }
@@ -1839,10 +1950,18 @@ say <- function(...) {
   flush.console()
 }
 
+say_debug <- function(...) {
+  if (!isTRUE(getOption("geotrees.debug", FALSE))) return(invisible())
+  say(...)
+}
+
 log_line <- function(path, ...) {
   msg <- paste0(format(Sys.time(), "%Y-%m-%d %H:%M:%S"), " | ", paste0(..., collapse = ""))
-  cat(msg, "\n")
-  flush.console()
+  # Always keep disk log; console only in debug (progress_bar / say cover the UI).
+  if (isTRUE(getOption("geotrees.debug", FALSE))) {
+    cat(msg, "\n")
+    flush.console()
+  }
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   cat(msg, "\n", file = path, append = TRUE)
 }
@@ -1942,6 +2061,7 @@ resolve_cores <- function(n) {
 
 main <- function() {
   opt <- parse_cli(commandArgs(trailingOnly = TRUE))
+  options(geotrees.debug = isTRUE(opt$debug))
   if (opt$help) {
     cat(paste(help_text(), collapse = "\n"), "\n")
     return(0L)
@@ -2184,7 +2304,10 @@ main <- function() {
   } else {
     say("ALS API: desligada (sem ALS_MACHINE_TOKEN / --no-als-api).")
   }
-  source_helper(file.path(dir_script, "ALS_processing_helperfunctions_v.1.0.4.R"))
+  source_helper(
+    file.path(dir_script, "ALS_processing_helperfunctions_v.1.0.4.R"),
+    debug = isTRUE(opt$debug)
+  )
   meta_base <- NULL
   if (nzchar(opt$metadata)) {
     say("Sobrescrevendo campos do template com --metadata: ", opt$metadata)
@@ -2342,6 +2465,14 @@ main <- function() {
         say("ALS claim ok: ", meta$tile_id)
       }
     }
+    progress_bar(i - 1L, n_fila, paste0("iniciando ", meta$tile_id))
+    progress_done()
+    say(sprintf(
+      "[%d/%d] PROCESSANDO %s | bloco %s | EPSG %s -> %s",
+      i, n_fila, meta$tile_id,
+      if (nzchar(meta$bloco)) meta$bloco else "-",
+      as.character(meta$epsg_artic), as.character(meta$epsg_proc)
+    ))
     log_line(
       paths$runlog,
       sprintf(
@@ -2436,6 +2567,8 @@ main <- function() {
       )
     }
     faltam_depois <- n_fila - i
+    progress_bar(i, n_fila, if (status == "erro") paste0("ERRO ", row$tile_id) else paste0("OK ", row$tile_id))
+    progress_done()
     mostrar_eta(rodada, registry, faltam_depois, este_min = result$minutos)
     log_line(
       paths$runlog,
@@ -2449,6 +2582,8 @@ main <- function() {
     )
     gc(verbose = FALSE)
   }
+  progress_bar(n_fila, n_fila, "fila desta rodada concluida")
+  progress_done()
 
   if (als$enabled && length(pending_als)) {
     say("ALS flush final: ", length(pending_als), " tile(s)...")
