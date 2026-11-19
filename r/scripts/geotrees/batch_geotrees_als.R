@@ -52,7 +52,7 @@ GPKG_COLS <- c(
 
 HELPER_PKGS <- c(
   "Hmisc", "data.table", "terra", "sf", "igraph", "viridisLite",
-  "lidR", "lasR", "future"
+  "lidR", "lasR", "future", "sp", "raster"
 )
 LASR_REPO <- "https://r-lidar.r-universe.dev"
 
