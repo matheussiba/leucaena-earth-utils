@@ -22,11 +22,16 @@ renv/library/
 renv/python/
 renv/staging/
 
-# Official single-file runner. The batch script does not use it.
+# Official single-file runners. The batch scripts do not use them.
 r/scripts/geotrees/ALS_processing.R
+r/scripts/geotrees/lastools/ALS_processing_v.1.0.4_RCP.R
 
-# Local GeoTrees launcher. Copy batch_geotrees_als-sample.bat to this name.
+# Local GeoTrees launchers. Copy *-sample.bat to these names.
 r/scripts/geotrees/batch_geotrees_als.bat
+r/scripts/geotrees/lastools/batch_geotrees_als_lastools.bat
+
+# Accidental R graphics device output
+r/scripts/geotrees/Rplots.pdf
 
 # Quarto
 _quarto/
