@@ -87,7 +87,7 @@ The time estimate is printed after each finished tile. It is the mean of success
 
 ## leucaena.earth ALS API (multi-PC)
 
-Both `batch_geotrees_als.R` and `batch_geotrees_als_lastools.R` can coordinate tiles through the [leucaena.earth](https://leucaena.earth) ALS registry. When `ALS_MACHINE_TOKEN` is set (or you pass `--als-api-token`), the batch upserts the plan, **claims** each tile before processing, **reports** results every **5** tiles by default (`ALS_REPORT_EVERY` / `--als-report-every`), and **flushes** any remaining reports at the end of the run. Tiles without a mappable CRS are reported as skipped (status 4). Shared client: `als_registry_api.R`.
+Both `batch_geotrees_als.R` and `batch_geotrees_als_lastools.R` can coordinate tiles through the [leucaena.earth](https://leucaena.earth) ALS registry. When `ALS_MACHINE_TOKEN` is set (or you pass `--als-api-token`), the batch upserts the plan, **claims** each tile before processing (`3`), and **reports** terminal outcomes immediately (`1` / `2` / `4`). Status **`1` is only sent after products exist under `processed/<utm>/<tile>/`** (`_INFO_summary_processing.csv`, no `_ERROR.txt`). Sync tiles already at `1` are never downgraded by the API. To clear failed/stuck tiles from an old run without touching successes: `als_reset_non_ok.R --hostname RSPC-001`.
 
 ## LAStools variant
 
