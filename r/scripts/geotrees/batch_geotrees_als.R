@@ -29,7 +29,7 @@
 #
 # Para parar entre tiles, crie o arquivo PARAR.txt dentro de OUT_DIR.
 
-VERSION <- "1.3.3"
+VERSION <- "1.3.4"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -1739,8 +1739,8 @@ quiet_wrap_cmd <- function(command, intern = FALSE) {
         grepl(">nul\\s+2>&1|>NUL\\s+2>&1", cmd, ignore.case = TRUE)) {
       return(cmd)
     }
-    inner <- paste(cmd, ">nul 2>&1")
-    return(paste("cmd /c", shQuote(inner, type = "cmd")))
+    # Nao usar shQuote() no comando inteiro: quebra glob *.laz e aspas do helper.
+    return(paste("cmd /c", cmd, ">nul 2>&1"))
   }
   if (grepl(">/dev/null", cmd, fixed = TRUE)) return(cmd)
   paste(cmd, ">/dev/null 2>&1")

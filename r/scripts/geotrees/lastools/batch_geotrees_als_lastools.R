@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.3-lastools"
+VERSION <- "1.3.4-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -1755,8 +1755,11 @@ quiet_wrap_cmd <- function(command, intern = FALSE) {
         grepl(">nul\\s+2>&1|>NUL\\s+2>&1", cmd, ignore.case = TRUE)) {
       return(cmd)
     }
-    inner <- paste(cmd, ">nul 2>&1")
-    return(paste("cmd /c", shQuote(inner, type = "cmd")))
+    # Nao usar shQuote() no comando inteiro: isso quebra o glob *.laz/*.las
+    # (e aspas ja colocadas por file.path.system). O LAStools deixa de achar
+    # input -> outlines vazios -> "subscript out of bounds" no clustering.
+    # Paths com espaco ja vem entre aspas do helper; cmd /c + redirect basta.
+    return(paste("cmd /c", cmd, ">nul 2>&1"))
   }
   if (grepl(">/dev/null", cmd, fixed = TRUE)) return(cmd)
   paste(cmd, ">/dev/null 2>&1")
