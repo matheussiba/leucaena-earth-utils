@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.6-lastools"
+VERSION <- "1.3.7-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -304,7 +304,7 @@ help_text <- function() {
     "  --als-soft-fail        Se a API cair, processa e enfileira report (padrao ligado)",
     "  --max-hours N          Para entre tiles apos N horas. Omitido/vazio = sem limite.",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
-    "Parar no meio: PARAR.txt em OUT_DIR. Offline: fila geotrees_als_api_queue.json."
+    "Parar no meio: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json."
   )
 }
 
@@ -1596,7 +1596,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
     "- Rode o mesmo .bat de novo. Tile com `_INFO_summary_processing.csv` e sem `_ERROR.txt` nao e refeito.",
     "- Erro entra de novo na fila. `--force` refaz tambem o que ja deu certo.",
     "- `--report-only` so atualiza este .md, o CSV e o GPKG.",
-    "- Para parar no fim do tile atual, crie `PARAR.txt` em OUT_DIR e apague o arquivo antes da proxima rodada.",
+    "- Para parar no fim do tile atual, crie `PARAR.txt` em OUT_DIR (o script apaga o arquivo ao encerrar).",
     "- A articulacao IGC nao e modificada. O poligono do tile e copiado para o GPKG de registro.",
     "",
     "Produtos do pipeline (Fischer et al. 2024, Methods in Ecology and Evolution): DTM, DSM, CHM (`chm_highest`, `chm_tin`, `chm_lspikefree`), densidade de pulso, angulo de varredura e os `_INFO_`.",
@@ -2422,6 +2422,8 @@ main <- function() {
     if (file.exists(paths$parar)) {
       parou <- TRUE
       log_line(paths$runlog, "PARAR.txt encontrado. Parando antes do tile ", i, "/", n_fila, ".")
+      say("PARAR.txt encontrado. Encerrando apos o tile anterior; apagando PARAR.txt.")
+      try(unlink(paths$parar), silent = TRUE)
       break
     }
     item <- fila[i]
