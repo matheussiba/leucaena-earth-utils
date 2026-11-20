@@ -45,17 +45,21 @@ echo.
 %PY% -u "%~dp0build_rgbnir_from_rgb_ir.py" %*
 set "RC=%ERRORLEVEL%"
 
-REM 3 = outra copia ja segura a trava. Fecha esta janela sem pause.
-if "%RC%"=="3" exit /b 3
-
 echo.
-echo Terminou com codigo %RC%.
-echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
-echo Registro:    G:\RGBNIR\rgbnir_registry.csv
-echo Dicionario:  G:\RGBNIR\rgbnir_registry_dicionario.csv
-echo.
-echo Se o codigo nao for 0, rode este .bat de novo para continuar do que falta.
+if "%RC%"=="3" (
+    echo [AVISO] Outra copia deste script JA ESTA RODANDO ^(trava no disco de saida^).
+    echo         Nao abra duas janelas. Deixe a outra continuar; esta so avisa e sai.
+    echo Codigo: 3
+) else (
+    echo Terminou com codigo %RC%.
+    echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
+    echo Registro:    G:\RGBNIR\rgbnir_registry.csv
+    echo Dicionario:  G:\RGBNIR\rgbnir_registry_dicionario.csv
+    echo.
+    echo Se o codigo nao for 0, rode este .bat de novo para continuar do que falta.
+)
 
+REM Duplo clique: pausa para da para ler. Ja dentro de um CMD aberto: nao pausa.
 echo %cmdcmdline% | findstr /i /c:"%~f0" >nul
 if %errorlevel%==0 pause
 exit /b %RC%
