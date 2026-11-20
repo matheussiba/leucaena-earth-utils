@@ -3998,7 +3998,7 @@ def main(argv: list[str] | None = None) -> int:
 
     lock = RunLock(out_dir, run_id)
     if not lock.acquire():
-        # 3 = another live copy holds the lock. The .bat shows a message and pauses.
+        # 3 = another live copy holds the lock. The .bat shows a message, waits ~15s, exits.
         return 3 if lock.blocked_by_other else 2
 
     exit_code = 0
