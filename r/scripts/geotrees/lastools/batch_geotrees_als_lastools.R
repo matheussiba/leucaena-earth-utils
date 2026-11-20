@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.5-lastools"
+VERSION <- "1.3.6-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -76,14 +76,16 @@ default_opt <- function() {
     force_utm = "from_metadata",
     metadata = "",
     path_lastools = "C:/LAStools/bin",
-    max_hours = 24,
+    # Inf = sem limite de horas (MAX_HOURS vazio no .bat)
+    max_hours = Inf,
     als_api = NA,
     als_api_url = "https://leucaena.earth",
     als_api_token = "",
     als_report_every = 5L,
     als_lease_seconds = 7200L,
     als_allow_retry = TRUE,
-    als_soft_fail = FALSE,
+    # Offline/API instavel: processa local e enfileira report
+    als_soft_fail = TRUE,
     debug = FALSE
   )
 }
@@ -202,7 +204,11 @@ parse_cli <- function(argv) {
     stop("resolution, size-tile e size-buffer invalidos.", call. = FALSE)
   }
   if (opt$limit < 0L) stop("--limit precisa ser >= 0.", call. = FALSE)
-  if (is.na(opt$max_hours) || opt$max_hours <= 0) opt$max_hours <- 24
+  # vazio / NA / <=0 / Inf = sem limite; so para se --max-hours N finito > 0
+  if (is.null(opt$max_hours) || length(opt$max_hours) == 0L || is.na(opt$max_hours) ||
+      !is.finite(opt$max_hours) || opt$max_hours <= 0) {
+    opt$max_hours <- Inf
+  }
   opt$path_lastools <- gsub("\\\\", "/", opt$path_lastools)
   opt$path_lastools <- sub("/+$", "", opt$path_lastools)
   if (!nzchar(trimws(opt$als_api_token))) {
@@ -234,6 +240,10 @@ parse_bool_loose <- function(val, default = FALSE) {
 }
 
 num_arg <- function(val, nome) {
+  key <- tolower(trimws(as.character(val[[1]])))
+  if (!nzchar(key) || key %in% c("inf", "infinity", "unlimited", "none", "0")) {
+    return(Inf)
+  }
   v <- suppressWarnings(as.numeric(val))
   if (length(v) != 1L || is.na(v)) {
     stop(nome, " precisa ser numero. Recebi: ", val, call. = FALSE)
@@ -291,9 +301,10 @@ help_text <- function() {
     "  --als-report-every N   Flush a cada N tiles (padrao 5)",
     "  --als-lease-seconds N  Lease do claim (padrao 7200)",
     "  --als-allow-retry      Recclaima status 2 (padrao ligado)",
-    "  --als-soft-fail        Se a API cair, processa sem claim",
+    "  --als-soft-fail        Se a API cair, processa e enfileira report (padrao ligado)",
+    "  --max-hours N          Para entre tiles apos N horas. Omitido/vazio = sem limite.",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
-    "Parar no meio: PARAR.txt em OUT_DIR. --max-hours tambem para entre tiles."
+    "Parar no meio: PARAR.txt em OUT_DIR. Offline: fila geotrees_als_api_queue.json."
   )
 }
 
@@ -2346,7 +2357,11 @@ main <- function() {
     )
   }
   say("LAStools: ", opt$path_lastools)
-  say("Limite desta rodada: ", opt$max_hours, " hora(s). A checagem e entre tiles.")
+  if (is.finite(opt$max_hours)) {
+    say("Limite desta rodada: ", opt$max_hours, " hora(s). A checagem e entre tiles.")
+  } else {
+    say("Limite desta rodada: indefinido (sem --max-hours). Pare com PARAR.txt ou Ctrl+C.")
+  }
   say("Metadata GCA: inline (acq_crs por tile via articulacao).")
   source(file.path(dirname(dir_script), "als_registry_api.R"), local = FALSE)
   als <- als_cfg(opt, pipeline = "lastools")
@@ -2355,9 +2370,14 @@ main <- function() {
     say(
       "ALS API: ", als$url,
       " | claim por tile | report a cada ", als$report_every,
-      " | lease ", als$lease_seconds, "s"
+      " | lease ", als$lease_seconds, "s",
+      " | soft-fail=", als$soft_fail,
+      " | fila local se offline"
     )
-    als_upsert_plan(als, plan, say_fn = say)
+    tryCatch(als_upsert_plan(als, plan, say_fn = say), error = function(e) {
+      say("AVISO ALS upsert (seguindo offline): ", conditionMessage(e))
+    })
+    pending_als <- als_flush_with_queue(als, paths$root, list(), say_fn = say)
   } else {
     say("ALS API: desligada (sem ALS_MACHINE_TOKEN / --no-als-api).")
   }
@@ -2385,7 +2405,7 @@ main <- function() {
   epsg_atual <- NA_integer_
   for (i in seq_len(n_fila)) {
     horas_rodada <- as.numeric(difftime(Sys.time(), t_run, units = "hours"))
-    if (!is.na(horas_rodada) && horas_rodada >= opt$max_hours) {
+    if (is.finite(opt$max_hours) && !is.na(horas_rodada) && horas_rodada >= opt$max_hours) {
       parou <- TRUE
       log_line(
         paths$runlog,
@@ -2465,7 +2485,8 @@ main <- function() {
         pending_als <- als_buffer_push(
           als, pending_als,
           als_result_payload(row, 4L, als$pipeline, paths$root),
-          say_fn = say
+          say_fn = say,
+          out_dir = paths$root
         )
       }
       next
@@ -2506,6 +2527,10 @@ main <- function() {
       )
     }
     if (als$enabled) {
+      # tenta esvaziar fila local se a rede voltou
+      if (length(pending_als) || file.exists(als_queue_path(paths$root))) {
+        pending_als <- als_flush_with_queue(als, paths$root, pending_als, say_fn = say)
+      }
       claim <- als_claim_one(als, meta$tile_id, maquina(), usuario())
       if (!isTRUE(claim$claimed)) {
         say("ALS claim pulou ", meta$tile_id, ": ", claim$reason)
@@ -2513,7 +2538,11 @@ main <- function() {
         next
       }
       if (!isTRUE(claim$ok) && isTRUE(claim$soft)) {
-        say("AVISO ALS claim soft-fail; processando mesmo assim: ", claim$reason)
+        if (isTRUE(claim$offline)) {
+          say("ALS offline/instavel; processando local e enfileirando report: ", claim$reason)
+        } else {
+          say("AVISO ALS claim soft-fail; processando mesmo assim: ", claim$reason)
+        }
       } else if (!isTRUE(claim$ok)) {
         n_erro_run <- n_erro_run + 1L
         say("FALHOU claim ", meta$tile_id, ": ", claim$reason)
@@ -2620,7 +2649,8 @@ main <- function() {
       pending_als <- als_buffer_push(
         als, pending_als,
         als_result_payload(row, als_code, als$pipeline, paths$root),
-        say_fn = say
+        say_fn = say,
+        out_dir = paths$root
       )
     }
     faltam_depois <- n_fila - i
@@ -2642,9 +2672,12 @@ main <- function() {
   progress_bar(n_fila, n_fila, "fila desta rodada concluida")
   progress_done()
 
-  if (als$enabled && length(pending_als)) {
-    say("ALS flush final: ", length(pending_als), " tile(s)...")
-    als_report_flush(als, pending_als, say_fn = say)
+  if (als$enabled) {
+    say("ALS flush final...")
+    pending_als <- als_flush_with_queue(als, paths$root, pending_als, say_fn = say)
+    if (length(pending_als)) {
+      say("Ainda ha ", length(pending_als), " resultado(s) na fila local (rede/API). Proxima rodada tenta de novo.")
+    }
   }
 
   if (artic_ok && nrow(registry)) {

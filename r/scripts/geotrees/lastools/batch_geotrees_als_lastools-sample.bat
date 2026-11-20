@@ -30,6 +30,7 @@ set "BLOCO="
 set "OUT_DIR=G:\geotrees_als_lastools"
 set "ARTICULACAO="
 set "PATH_LASTOOLS=C:\LAStools\bin"
+REM vazio = sem limite de horas; ex. 12 = para entre tiles apos 12h
 set "MAX_HOURS="
 set "N_CORES=20"
 set "LIMIT="
@@ -41,9 +42,8 @@ REM false = so andamento principal + barra de progresso (recomendado)
 set "DEBUG=false"
 
 REM >>> COLE O TOKEN DO RENDER AQUI (entre as aspas). Vazio = API desligada.
+REM Uma unica linha. Nao deixe outro set ALS_MACHINE_TOKEN= vazio abaixo.
 set "ALS_MACHINE_TOKEN="
-
-if not defined MAX_HOURS set "MAX_HOURS=24"
 
 echo ============================================================
 echo  GeoTrees ALS por tile (LAStools)
@@ -52,7 +52,11 @@ echo  LAZ     : %LAZ_DIR%
 echo  BLOCO   : %BLOCO%  (vazio = pasta inteira)
 echo  Saida   : %OUT_DIR%
 echo  LAStools: %PATH_LASTOOLS%
-echo  Horas   : %MAX_HOURS%
+if "!MAX_HOURS!"=="" (
+  echo  Horas   : indefinido ^(sem limite^)
+) else (
+  echo  Horas   : !MAX_HOURS!
+)
 echo  Nucleos : %N_CORES%
 echo  API     : %ALS_API_URL%
 if "!ALS_MACHINE_TOKEN!"=="" (
@@ -111,7 +115,8 @@ set "CORES_ARG="
 set "LIMIT_ARG="
 set "ARTIC_ARG="
 set "LASTOOLS_ARG=--path-lastools "%PATH_LASTOOLS%""
-set "HOURS_ARG=--max-hours %MAX_HOURS%"
+set "HOURS_ARG="
+if defined MAX_HOURS if not "%MAX_HOURS%"=="" set "HOURS_ARG=--max-hours %MAX_HOURS%"
 set "ALS_URL_ARG=--als-api-url "%ALS_API_URL%""
 set "ALS_REP_ARG=--als-report-every %ALS_REPORT_EVERY%"
 set "DEBUG_ARG=--no-debug"
