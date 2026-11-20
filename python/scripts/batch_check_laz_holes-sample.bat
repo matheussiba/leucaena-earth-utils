@@ -3,6 +3,12 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 title LAZ holes  D:\laz  -^>  D:\laz_holes_igc.gpkg
 chcp 65001 >nul
+
+REM =====================================================================
+REM  Copie para: batch_check_laz_holes.bat  (local, fora do git)
+REM  Edite a copia (caminhos D:\laz etc.).
+REM =====================================================================
+
 set "PYTHONUNBUFFERED=1"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
