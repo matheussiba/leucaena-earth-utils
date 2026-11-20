@@ -32,6 +32,9 @@ pause
 exit /b !RC!
 
 :main
+REM =====================================================================
+REM  VARIAVEIS PARA EDITAR (um unico bloco)
+REM =====================================================================
 set "LAZ_DIR=D:\laz"
 set "BLOCO="
 set "OUT_DIR=G:\geotrees_als_lastools"
@@ -51,6 +54,19 @@ set "DEBUG=false"
 REM >>> COLE O TOKEN DO RENDER AQUI (entre as aspas). Vazio = API desligada.
 REM Uma unica linha. Nao deixe outro set ALS_MACHINE_TOKEN= vazio abaixo.
 set "ALS_MACHINE_TOKEN="
+
+REM NAS: copia async OUT_DIR\processed\<utm>\<tile>
+REM   -> NAS_DIR\<Fehidro|Lote04|Voo22>\<BLOCO>\<tile>
+REM Layer da articulacao: Articulacao_Laser_Fehidro / Lote4 / Voo22
+REM Vazio = desliga copia NAS
+set "NAS_DIR=O:\ALS_IGC"
+REM true = apos copia OK no NAS, apaga a pasta local em OUT_DIR\processed
+REM false = mantem local (padrao)
+set "NAS_DELETE_LOCAL=false"
+REM true = quando tile fecha com status 1, apaga o .laz em LAZ_DIR (padrao)
+REM false = mantem o .laz
+set "DELETE_LAZ_ON_OK=true"
+REM =====================================================================
 
 echo ============================================================
 echo  GeoTrees ALS por tile (LAStools)
@@ -73,6 +89,9 @@ if "!ALS_MACHINE_TOKEN!"=="" (
 )
 echo  Report  : a cada %ALS_REPORT_EVERY% tile(s)
 echo  Debug   : %DEBUG%
+echo  NAS     : %NAS_DIR%
+echo  NAS del : %NAS_DELETE_LOCAL%  ^(apagar OUTDIR apos copia^)
+echo  Del LAZ : %DELETE_LAZ_ON_OK%  ^(apagar .laz quando status 1^)
 echo  Produtos: %OUT_DIR%\processed\22^|23\^<tile^>
 echo ============================================================
 echo.
@@ -135,12 +154,24 @@ if defined N_CORES set "CORES_ARG=--n-cores %N_CORES%"
 if defined LIMIT set "LIMIT_ARG=--limit %LIMIT%"
 if defined ARTICULACAO set "ARTIC_ARG=--articulacao "%ARTICULACAO%""
 
+set "NAS_ARG="
+if defined NAS_DIR if not "%NAS_DIR%"=="" set "NAS_ARG=--nas-dir "%NAS_DIR%""
+set "NAS_DEL_ARG=--no-nas-delete-local"
+if /I "%NAS_DELETE_LOCAL%"=="true" set "NAS_DEL_ARG=--nas-delete-local"
+if /I "%NAS_DELETE_LOCAL%"=="1" set "NAS_DEL_ARG=--nas-delete-local"
+if /I "%NAS_DELETE_LOCAL%"=="yes" set "NAS_DEL_ARG=--nas-delete-local"
+set "DEL_LAZ_ARG=--delete-laz-on-ok"
+if /I "%DELETE_LAZ_ON_OK%"=="false" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
+if /I "%DELETE_LAZ_ON_OK%"=="0" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
+if /I "%DELETE_LAZ_ON_OK%"=="no" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
+if /I "%DELETE_LAZ_ON_OK%"=="nao" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
+
 REM Token so no ambiente deste .bat (set acima). Nao passa --als-api-token.
 echo Comando:
-echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %*
+echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %*
 echo.
 
-"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.
@@ -152,4 +183,5 @@ if not "%RC%"=="0" (
 echo Relatorio: %OUT_DIR%\geotrees_als_relatorio.md
 echo Registro:  %OUT_DIR%\geotrees_als_registry.csv
 echo GPKG:      %OUT_DIR%\geotrees_als_registro.gpkg
+echo NAS log:   %OUT_DIR%\geotrees_als_nas_log.csv
 exit /b %RC%

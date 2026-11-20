@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.7-lastools"
+VERSION <- "1.3.8-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -86,7 +86,12 @@ default_opt <- function() {
     als_allow_retry = TRUE,
     # Offline/API instavel: processa local e enfileira report
     als_soft_fail = TRUE,
-    debug = FALSE
+    debug = FALSE,
+    # NAS: O:/ALS_IGC/<Fehidro|Lote04|Voo22>/<BLOCO>/<tile>
+    nas_dir = "",
+    nas_delete_local = FALSE,
+    # Apaga o .laz em LAZ_DIR quando o tile fecha com status 1
+    delete_laz_on_ok = TRUE
   )
 }
 
@@ -95,13 +100,16 @@ parse_cli <- function(argv) {
   bools <- c(
     "--force", "--dry-run", "--report-only", "--list-blocos", "--help",
     "--no-blast", "--als-api", "--no-als-api", "--als-allow-retry",
-    "--als-soft-fail", "--debug", "--no-debug"
+    "--als-soft-fail", "--debug", "--no-debug",
+    "--nas-delete-local", "--no-nas-delete-local",
+    "--delete-laz-on-ok", "--no-delete-laz-on-ok"
   )
   valued <- c(
     "--laz-dir", "--bloco", "--out-dir", "--articulacao", "--articulacao-layer",
     "--n-cores", "--resolution", "--size-tile", "--size-buffer", "--limit",
     "--name-job", "--metadata", "--force-utm", "--path-lastools", "--max-hours",
-    "--als-api-url", "--als-api-token", "--als-report-every", "--als-lease-seconds"
+    "--als-api-url", "--als-api-token", "--als-report-every", "--als-lease-seconds",
+    "--nas-dir"
   )
   i <- 1L
   while (i <= length(argv)) {
@@ -166,6 +174,26 @@ parse_cli <- function(argv) {
       i <- i + 1L
       next
     }
+    if (a == "--nas-delete-local") {
+      opt$nas_delete_local <- TRUE
+      i <- i + 1L
+      next
+    }
+    if (a == "--no-nas-delete-local") {
+      opt$nas_delete_local <- FALSE
+      i <- i + 1L
+      next
+    }
+    if (a == "--delete-laz-on-ok") {
+      opt$delete_laz_on_ok <- TRUE
+      i <- i + 1L
+      next
+    }
+    if (a == "--no-delete-laz-on-ok") {
+      opt$delete_laz_on_ok <- FALSE
+      i <- i + 1L
+      next
+    }
     if (!a %in% valued) {
       stop(
         "Argumento desconhecido: ", a,
@@ -195,6 +223,7 @@ parse_cli <- function(argv) {
     if (a == "--als-api-token") opt$als_api_token <- val
     if (a == "--als-report-every") opt$als_report_every <- as.integer(num_arg(val, a))
     if (a == "--als-lease-seconds") opt$als_lease_seconds <- as.integer(num_arg(val, a))
+    if (a == "--nas-dir") opt$nas_dir <- val
   }
   opt$force_utm <- normalize_force_utm(opt$force_utm)
   if (!is.na(opt$n_cores) && opt$n_cores < 1L) {
@@ -228,6 +257,8 @@ parse_cli <- function(argv) {
   if (nzchar(env_dbg) && !any(argv %in% c("--debug", "--no-debug"))) {
     opt$debug <- parse_bool_loose(env_dbg, default = FALSE)
   }
+  opt$nas_dir <- gsub("\\\\", "/", trimws(as.character(opt$nas_dir)))
+  opt$nas_dir <- sub("/+$", "", opt$nas_dir)
   opt
 }
 
@@ -303,8 +334,14 @@ help_text <- function() {
     "  --als-allow-retry      Recclaima status 2 (padrao ligado)",
     "  --als-soft-fail        Se a API cair, processa e enfileira report (padrao ligado)",
     "  --max-hours N          Para entre tiles apos N horas. Omitido/vazio = sem limite.",
+    "  --nas-dir DIR          Copia produtos p/ NAS (ex. O:/ALS_IGC). Vazio = desliga.",
+    "  --nas-delete-local     Apos copia OK no NAS, apaga pasta em OUT_DIR/processed (padrao off)",
+    "  --no-nas-delete-local",
+    "  --delete-laz-on-ok     Apaga .laz em LAZ_DIR quando status 1 (padrao on)",
+    "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
-    "Parar no meio: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json."
+    "Parar: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
+    "NAS: <nas>/<Fehidro|Lote04|Voo22>/<BLOCO>/<tile> (layer da articulacao)."
   )
 }
 
@@ -512,7 +549,8 @@ out_paths <- function(out_dir) {
     laz_index_meta = file.path(out_dir, "geotrees_als_laz_indice_meta.csv"),
     artic_index = file.path(out_dir, "geotrees_als_artic_indice.csv"),
     artic_index_meta = file.path(out_dir, "geotrees_als_artic_indice_meta.csv"),
-    parar = file.path(out_dir, "PARAR.txt")
+    parar = file.path(out_dir, "PARAR.txt"),
+    nas_log = file.path(out_dir, "geotrees_als_nas_log.csv")
   )
 }
 
@@ -1892,6 +1930,290 @@ source_helper <- function(path, debug = FALSE) {
   say("Pipeline GeoTrees carregado.", if (isTRUE(debug)) " (DEBUG=on)" else " (saida quieta; use --debug para verbose)")
 }
 
+# ---------------------------------------------------------------------------
+# NAS: copia async OUT_DIR/processed/<utm>/<tile> -> NAS/<layer>/<BLOCO>/<tile>
+# ---------------------------------------------------------------------------
+
+nas_layer_folder <- function(layer_artic) {
+  key <- tolower(trimws(as.character(layer_artic)))
+  if (!nzchar(key)) return("")
+  if (grepl("fehidro", key, fixed = TRUE)) return("Fehidro")
+  if (grepl("lote0?4|lote4", key)) return("Lote04")
+  if (grepl("voo22", key, fixed = TRUE)) return("Voo22")
+  ""
+}
+
+nas_products_ok <- function(pasta) {
+  pasta <- as.character(pasta)
+  if (!nzchar(pasta) || !dir.exists(pasta)) return(FALSE)
+  info <- list.files(pasta, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
+  err <- list.files(pasta, pattern = "^_ERROR\\.txt$", recursive = TRUE)
+  length(info) > 0L && length(err) == 0L
+}
+
+nas_dest_path <- function(nas_root, layer_artic, bloco, tile_id) {
+  layer_dir <- nas_layer_folder(layer_artic)
+  if (!nzchar(layer_dir) || !nzchar(nas_root)) return("")
+  bl <- trimws(as.character(bloco))
+  if (!nzchar(bl) || is.na(bl)) bl <- "_SEM_BLOCO"
+  file.path(nas_root, layer_dir, bl, toupper(as.character(tile_id)))
+}
+
+nas_copy_tree <- function(src, dest) {
+  src <- normalizePath(src, winslash = "/", mustWork = TRUE)
+  dest <- gsub("\\\\", "/", dest)
+  dir.create(dest, recursive = TRUE, showWarnings = FALSE)
+  if (.Platform$OS.type == "windows") {
+    src_w <- normalizePath(src, winslash = "\\")
+    dest_w <- chartr("/", "\\", dest)
+    rc <- suppressWarnings(system2(
+      "robocopy",
+      c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
+      stdout = FALSE,
+      stderr = FALSE
+    ))
+    # robocopy: 0-7 = sucesso parcial/total; >=8 = falha
+    ok <- !is.na(rc) && rc < 8L
+  } else {
+    files <- list.files(src, all.files = TRUE, full.names = TRUE, no.. = TRUE)
+    ok <- TRUE
+    for (f in files) {
+      if (!file.copy(f, dest, recursive = TRUE, overwrite = TRUE)) ok <- FALSE
+    }
+  }
+  isTRUE(ok) && nas_products_ok(dest)
+}
+
+append_nas_log <- function(path, row) {
+  dt <- data.table::as.data.table(row)
+  if (file.exists(path)) {
+    data.table::fwrite(dt, path, append = TRUE, col.names = FALSE)
+  } else {
+    data.table::fwrite(dt, path)
+  }
+}
+
+maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
+  if (!isTRUE(enabled)) return(invisible(FALSE))
+  lp <- suppressWarnings(normalizePath(laz_path, winslash = "/", mustWork = FALSE))
+  ld <- suppressWarnings(normalizePath(laz_dir, winslash = "/", mustWork = FALSE))
+  if (!nzchar(lp) || !file.exists(lp)) return(invisible(FALSE))
+  under <- startsWith(tolower(lp), tolower(paste0(ld, "/"))) ||
+    identical(tolower(dirname(lp)), tolower(ld))
+  if (!under) {
+    say("AVISO: LAZ fora de LAZ_DIR; nao apaguei: ", lp)
+    return(invisible(FALSE))
+  }
+  ok <- isTRUE(unlink(lp) == 0L) && !file.exists(lp)
+  if (ok) say("LAZ removido (tile ok / status 1): ", basename(lp))
+  else say("AVISO: falha ao apagar LAZ: ", lp)
+  invisible(ok)
+}
+
+nas_init <- function(opt) {
+  env <- new.env(parent = emptyenv())
+  env$enabled <- nzchar(opt$nas_dir)
+  env$root <- opt$nas_dir
+  env$delete_local <- isTRUE(opt$nas_delete_local)
+  env$jobs <- list()
+  env$old_plan <- NULL
+  env$use_future <- FALSE
+  env$done <- FALSE
+  if (env$enabled) {
+    if (!dir.exists(env$root)) {
+      say("AVISO NAS: pasta nao acessivel agora: ", env$root, " (copias ficam para quando montar)")
+    } else {
+      say("NAS: ", env$root, " | apagar local apos copia: ", env$delete_local)
+    }
+    if (requireNamespace("future", quietly = TRUE)) {
+      env$old_plan <- future::plan()
+      ok_plan <- TRUE
+      tryCatch(
+        future::plan(future::multisession, workers = 2L),
+        error = function(e) {
+          say("AVISO NAS: future multisession falhou; copia sincrona. ", conditionMessage(e))
+          ok_plan <<- FALSE
+        }
+      )
+      env$use_future <- isTRUE(ok_plan)
+    } else {
+      say("AVISO NAS: pacote future ausente; copia sincrona.")
+    }
+  }
+  env
+}
+
+nas_finish_one <- function(res, paths, say_fn = say) {
+  if (is.null(res) || !is.list(res)) return(invisible(FALSE))
+  ok <- isTRUE(res$ok)
+  append_nas_log(paths$nas_log, list(
+    tile_id = res$tile_id,
+    status = if (ok) "ok" else "erro",
+    src = res$src,
+    dest = res$dest,
+    utc = utc_now(),
+    erro = if (ok) "" else as.character(res$erro %||% "copia falhou")
+  ))
+  if (ok) {
+    say_fn("NAS ok: ", res$tile_id, " -> ", res$dest)
+    if (isTRUE(res$delete_local) && nzchar(res$src) && dir.exists(res$src)) {
+      unlink(res$src, recursive = TRUE, force = TRUE)
+      say_fn("NAS: pasta local removida apos copia: ", res$src)
+    }
+  } else {
+    say_fn("AVISO NAS falhou ", res$tile_id, ": ", res$erro %||% "erro")
+  }
+  invisible(ok)
+}
+
+`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1L && is.na(a))) b else a
+
+nas_reap <- function(nas, paths, wait = FALSE) {
+  if (!isTRUE(nas$enabled) || !length(nas$jobs)) return(invisible(NULL))
+  keep <- list()
+  for (job in nas$jobs) {
+    fut <- job$fut
+    ready <- isTRUE(wait) || (!is.null(fut) && isTRUE(future::resolved(fut))) || is.null(fut)
+    if (!ready) {
+      keep[[length(keep) + 1L]] <- job
+      next
+    }
+    res <- if (!is.null(fut)) {
+      tryCatch(future::value(fut), error = function(e) {
+        list(
+          ok = FALSE, tile_id = job$tile_id, src = job$src, dest = job$dest,
+          delete_local = job$delete_local, erro = conditionMessage(e)
+        )
+      })
+    } else {
+      job$result
+    }
+    nas_finish_one(res, paths)
+  }
+  nas$jobs <- keep
+  invisible(NULL)
+}
+
+nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
+  if (!isTRUE(nas$enabled)) return(invisible(FALSE))
+  if (!nzchar(src) || !dir.exists(src) || !nas_products_ok(src)) {
+    say("AVISO NAS: origem sem produto final, pulando ", tile_id)
+    return(invisible(FALSE))
+  }
+  dest <- nas_dest_path(nas$root, layer_artic, bloco, tile_id)
+  if (!nzchar(dest)) {
+    say("AVISO NAS: layer desconhecido (", layer_artic, ") para ", tile_id, " — nao copiado.")
+    return(invisible(FALSE))
+  }
+  if (nas_products_ok(dest)) {
+    say("NAS ja tem produto: ", dest)
+    if (isTRUE(nas$delete_local)) {
+      unlink(src, recursive = TRUE, force = TRUE)
+      say("NAS: pasta local removida (ja estava no NAS): ", src)
+    }
+    return(invisible(TRUE))
+  }
+  if (!dir.exists(nas$root)) {
+    say("AVISO NAS offline; fica para o proximo run: ", tile_id)
+    return(invisible(FALSE))
+  }
+  say("NAS copiando em paralelo: ", tile_id, " -> ", dest)
+  delete_local <- isTRUE(nas$delete_local)
+  src_n <- src
+  dest_n <- dest
+  tid <- toupper(tile_id)
+  if (isTRUE(nas$use_future)) {
+    # Corpo auto-contido: worker multisession nao herda funcoes do script.
+    fut <- future::future({
+      src_w <- normalizePath(src_n, winslash = "\\", mustWork = TRUE)
+      dest_w <- chartr("/", "\\", gsub("\\\\", "/", dest_n))
+      dir.create(dest_n, recursive = TRUE, showWarnings = FALSE)
+      rc <- suppressWarnings(system2(
+        "robocopy",
+        c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
+        stdout = FALSE,
+        stderr = FALSE
+      ))
+      ok_rc <- !is.na(rc) && rc < 8L
+      info <- list.files(dest_n, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
+      err <- list.files(dest_n, pattern = "^_ERROR\\.txt$", recursive = TRUE)
+      ok <- isTRUE(ok_rc) && length(info) > 0L && length(err) == 0L
+      list(
+        ok = ok, tile_id = tid, src = src_n, dest = dest_n,
+        delete_local = delete_local,
+        erro = if (ok) "" else paste0("robocopy rc=", as.character(rc), " ou sem _INFO no destino")
+      )
+    }, seed = NULL)
+    nas$jobs[[length(nas$jobs) + 1L]] <- list(
+      fut = fut, tile_id = tid, src = src_n, dest = dest_n, delete_local = delete_local
+    )
+  } else {
+    ok <- tryCatch(nas_copy_tree(src_n, dest_n), error = function(e) FALSE)
+    nas_finish_one(
+      list(
+        ok = isTRUE(ok), tile_id = tid, src = src_n, dest = dest_n,
+        delete_local = delete_local,
+        erro = if (isTRUE(ok)) "" else "copia sincrona falhou"
+      ),
+      paths
+    )
+  }
+  invisible(TRUE)
+}
+
+nas_shutdown <- function(nas, paths) {
+  if (!isTRUE(nas$enabled) || isTRUE(nas$done)) return(invisible(NULL))
+  if (length(nas$jobs)) {
+    say("NAS: aguardando ", length(nas$jobs), " copia(s) em andamento...")
+    nas_reap(nas, paths, wait = TRUE)
+  }
+  if (!is.null(nas$old_plan)) {
+    try(future::plan(nas$old_plan), silent = TRUE)
+    nas$old_plan <- NULL
+  }
+  nas$done <- TRUE
+  invisible(NULL)
+}
+
+nas_catchup <- function(nas, paths, registry, artic_dt = NULL) {
+  if (!isTRUE(nas$enabled)) return(invisible(0L))
+  if (!dir.exists(nas$root)) {
+    say("NAS catch-up adiado: ", nas$root, " inacessivel.")
+    return(invisible(0L))
+  }
+  tiles <- list_tile_dirs(paths$processed)
+  if (!length(tiles)) return(invisible(0L))
+  say("NAS catch-up: conferindo ", length(tiles), " pasta(s) em processed/...")
+  n_q <- 0L
+  for (k in tiles) {
+    if (!nas_products_ok(k)) next
+    tid <- toupper(basename(k))
+    bloco <- ""
+    layer <- ""
+    if (!is.null(registry) && nrow(registry)) {
+      hit <- which(toupper(as.character(registry$tile_id)) == tid)
+      if (length(hit)) {
+        bloco <- as.character(registry$bloco[[hit[[1]]]] %||% "")
+        layer <- as.character(registry$layer_artic[[hit[[1]]]] %||% "")
+      }
+    }
+    if ((!nzchar(bloco) || !nzchar(layer)) && !is.null(artic_dt) && nrow(artic_dt)) {
+      ah <- which(toupper(as.character(artic_dt$tile_id)) == tid)
+      if (length(ah)) {
+        if (!nzchar(bloco)) bloco <- as.character(artic_dt$bloco[[ah[[1]]]] %||% "")
+        if (!nzchar(layer)) layer <- as.character(artic_dt$layer_artic[[ah[[1]]]] %||% "")
+      }
+    }
+    dest <- nas_dest_path(nas$root, layer, bloco, tid)
+    if (!nzchar(dest)) next
+    if (nas_products_ok(dest)) next
+    nas_enqueue(nas, paths, k, layer, bloco, tid)
+    n_q <- n_q + 1L
+  }
+  say("NAS catch-up: ", n_q, " pasta(s) enfileirada(s) para copia.")
+  invisible(n_q)
+}
+
 run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   ext <- tolower(tools::file_ext(src))
   type_file <- if (ext %in% c("laz", "las")) ext else "laz"
@@ -2341,6 +2663,11 @@ main <- function() {
 
   fila <- if (is.null(plan)) plan else plan[acao == "processar"]
   if (is.null(fila) || !nrow(fila)) {
+    # Mesmo sem tile novo: sincroniza processed/ -> NAS (rodadas anteriores).
+    nas <- nas_init(opt)
+    on.exit(nas_shutdown(nas, paths), add = TRUE)
+    if (isTRUE(nas$enabled)) nas_catchup(nas, paths, registry, idx)
+    nas_shutdown(nas, paths)
     if (artic_ok && nrow(registry)) {
       rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
     }
@@ -2385,6 +2712,12 @@ main <- function() {
     file.path(dir_script, "ALS_processing_helperfunctions_v.1.0.4.R"),
     debug = isTRUE(opt$debug)
   )
+  nas <- nas_init(opt)
+  on.exit(nas_shutdown(nas, paths), add = TRUE)
+  say("Apagar LAZ apos tile ok (status 1): ", isTRUE(opt$delete_laz_on_ok))
+  if (isTRUE(nas$enabled)) {
+    nas_catchup(nas, paths, registry, idx)
+  }
   meta_base <- NULL
   if (nzchar(opt$metadata)) {
     say("Sobrescrevendo campos do template com --metadata: ", opt$metadata)
@@ -2404,6 +2737,7 @@ main <- function() {
 
   epsg_atual <- NA_integer_
   for (i in seq_len(n_fila)) {
+    nas_reap(nas, paths, wait = FALSE)
     horas_rodada <- as.numeric(difftime(Sys.time(), t_run, units = "hours"))
     if (is.finite(opt$max_hours) && !is.na(horas_rodada) && horas_rodada >= opt$max_hours) {
       parou <- TRUE
@@ -2591,6 +2925,15 @@ main <- function() {
       say("FALHOU ", meta$tile_id, ": ", result$erro)
       append_problema(paths$problemas, meta$tile_id, result$erro)
     }
+    if (identical(als_code, 1L)) {
+      maybe_delete_laz(meta$laz_path, opt$laz_dir, opt$delete_laz_on_ok)
+      if (isTRUE(nas$enabled) && nzchar(as.character(result$pasta_saida %||% ""))) {
+        nas_enqueue(
+          nas, paths, result$pasta_saida,
+          meta$layer_artic, meta$bloco, meta$tile_id
+        )
+      }
+    }
     row <- list(
       tile_id = meta$tile_id,
       laz_nome = meta$laz_nome,
@@ -2673,6 +3016,8 @@ main <- function() {
   }
   progress_bar(n_fila, n_fila, "fila desta rodada concluida")
   progress_done()
+
+  nas_shutdown(nas, paths)
 
   if (als$enabled) {
     say("ALS flush final...")
