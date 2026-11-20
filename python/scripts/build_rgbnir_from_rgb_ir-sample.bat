@@ -50,14 +50,18 @@ if "%RC%"=="3" (
     echo [AVISO] Outra copia deste script JA ESTA RODANDO ^(trava no disco de saida^).
     echo         Nao abra duas janelas. Deixe a outra continuar; esta so avisa e sai.
     echo Codigo: 3
-) else (
-    echo Terminou com codigo %RC%.
-    echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
-    echo Registro:    G:\RGBNIR\rgbnir_registry.csv
-    echo Dicionario:  G:\RGBNIR\rgbnir_registry_dicionario.csv
     echo.
-    echo Se o codigo nao for 0, rode este .bat de novo para continuar do que falta.
+    echo Esta janela fecha sozinha em 15 segundos...
+    timeout /t 15 /nobreak >nul
+    exit /b 3
 )
+
+echo Terminou com codigo %RC%.
+echo Resumo:      G:\RGBNIR\rgbnir_summary.csv
+echo Registro:    G:\RGBNIR\rgbnir_registry.csv
+echo Dicionario:  G:\RGBNIR\rgbnir_registry_dicionario.csv
+echo.
+echo Se o codigo nao for 0, rode este .bat de novo para continuar do que falta.
 
 REM Duplo clique: pausa para da para ler. Ja dentro de um CMD aberto: nao pausa.
 echo %cmdcmdline% | findstr /i /c:"%~f0" >nul
