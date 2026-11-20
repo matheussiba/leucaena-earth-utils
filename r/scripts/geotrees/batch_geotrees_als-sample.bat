@@ -6,7 +6,9 @@ chcp 65001 >nul
 
 REM =====================================================================
 REM  Copie para: batch_geotrees_als.bat  (local, fora do git)
-REM  Edite a copia. A janela SEMPRE fica aberta no fim (pause).
+REM  Edite a copia.
+REM  Codigo 3 (outra copia na trava): espera 15s e fecha (bom pro Agendador).
+REM  Outros finais: pause para ler a mensagem.
 REM
 REM  Token: cole ABAIXO no set "ALS_MACHINE_TOKEN=...".
 REM  Nao precisa de variavel de ambiente do Windows.
@@ -17,7 +19,12 @@ call :main %*
 set "RC=!ERRORLEVEL!"
 echo.
 echo Codigo de saida: !RC!
-if "!RC!"=="3" echo Outra copia ainda segura a trava (.geotrees_als.lock).
+if "!RC!"=="3" (
+  echo Outra copia ainda segura a trava ^(.geotrees_als.lock^).
+  echo Esta instancia nao vai processar. Fechando em 15 segundos...
+  timeout /t 15 /nobreak >nul
+  exit /b !RC!
+)
 echo.
 echo Esta janela fica aberta para voce ler a mensagem.
 pause
