@@ -9,6 +9,8 @@
 #   - _INFO_summary_processing.csv present, no _ERROR.txt
 # Never report 1 from staging / partial folders.
 # Claim (3) on start; report 1/2/4 immediately; flush leftover at end.
+# Offline: network/5xx soft-claim + persist reports in OUT_DIR/geotrees_als_api_queue.json
+# until the API is reachable again (flushed between tiles / end of run).
 
 als_ensure_http_pkgs <- function() {
   need <- c("jsonlite", "curl")
@@ -100,6 +102,13 @@ als_http_json <- function(cfg, method, path, body = NULL) {
   )
 }
 
+als_is_transient_http <- function(status) {
+  s <- suppressWarnings(as.integer(status %||% 0L))[[1]]
+  if (is.na(s)) return(TRUE)
+  # 0 = curl/network; 408/429/5xx = try again later
+  identical(s, 0L) || identical(s, 408L) || identical(s, 429L) || s >= 500L
+}
+
 als_claim_one <- function(cfg, tile_id, hostname, usuario) {
   if (!isTRUE(cfg$enabled)) {
     return(list(ok = TRUE, claimed = TRUE, reason = "api_off"))
@@ -125,8 +134,13 @@ als_claim_one <- function(cfg, tile_id, hostname, usuario) {
   )
   if (resp$status < 200L || resp$status >= 300L) {
     msg <- if (!is.null(resp$body$error)) as.character(resp$body$error) else resp$raw
-    if (isTRUE(cfg$soft_fail)) {
-      return(list(ok = FALSE, claimed = TRUE, reason = paste0("http_", resp$status, ": ", msg), soft = TRUE))
+    # Soft: process locally; site may catch up via report queue when online again.
+    if (isTRUE(cfg$soft_fail) || als_is_transient_http(resp$status)) {
+      return(list(
+        ok = FALSE, claimed = TRUE, soft = TRUE,
+        reason = paste0("http_", resp$status, ": ", msg),
+        offline = als_is_transient_http(resp$status)
+      ))
     }
     return(list(ok = FALSE, claimed = FALSE, reason = paste0("http_", resp$status, ": ", msg)))
   }
@@ -201,6 +215,56 @@ als_status_from_local <- function(status, result = NULL, skipped_na = FALSE) {
   1L
 }
 
+als_queue_path <- function(out_dir) {
+  file.path(as.character(out_dir %||% ""), "geotrees_als_api_queue.json")
+}
+
+als_queue_dedupe <- function(pending) {
+  if (!length(pending)) return(list())
+  ids <- vapply(pending, function(p) toupper(as.character(p$tile_id %||% "")), character(1))
+  # last write wins per tile
+  keep <- !duplicated(ids, fromLast = TRUE) & nzchar(ids)
+  pending[keep]
+}
+
+als_queue_load <- function(out_dir) {
+  p <- als_queue_path(out_dir)
+  if (!nzchar(p) || !file.exists(p)) return(list())
+  als_ensure_http_pkgs()
+  raw <- tryCatch(paste(readLines(p, warn = FALSE, encoding = "UTF-8"), collapse = "\n"), error = function(e) "")
+  if (!nzchar(trimws(raw))) return(list())
+  parsed <- tryCatch(jsonlite::fromJSON(raw, simplifyVector = FALSE), error = function(e) NULL)
+  if (is.null(parsed)) return(list())
+  if (!is.null(parsed$results) && is.list(parsed$results)) {
+    return(als_queue_dedupe(parsed$results))
+  }
+  if (is.list(parsed) && !is.null(parsed[[1]]$tile_id)) {
+    return(als_queue_dedupe(parsed))
+  }
+  list()
+}
+
+als_queue_save <- function(out_dir, pending, say_fn = message) {
+  p <- als_queue_path(out_dir)
+  if (!nzchar(p)) return(invisible(FALSE))
+  pending <- als_queue_dedupe(pending)
+  if (!length(pending)) {
+    if (file.exists(p)) try(unlink(p), silent = TRUE)
+    return(invisible(TRUE))
+  }
+  als_ensure_http_pkgs()
+  dir.create(dirname(p), recursive = TRUE, showWarnings = FALSE)
+  payload <- list(
+    updated_utc = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+    n = length(pending),
+    results = pending
+  )
+  txt <- jsonlite::toJSON(payload, auto_unbox = TRUE, null = "null", digits = NA, pretty = TRUE)
+  writeLines(txt, p, useBytes = TRUE)
+  say_fn("ALS fila local: ", length(pending), " tile(s) em ", p)
+  invisible(TRUE)
+}
+
 als_report_flush <- function(cfg, pending, say_fn = message) {
   if (!isTRUE(cfg$enabled) || !length(pending)) {
     return(list(pending = pending, ok = TRUE))
@@ -208,10 +272,12 @@ als_report_flush <- function(cfg, pending, say_fn = message) {
   if (!nzchar(cfg$token)) {
     return(list(pending = pending, ok = FALSE, error = "sem token"))
   }
+  pending <- als_queue_dedupe(pending)
   # API max 200; we flush in chunks of report_every or all remaining
   chunks <- split(pending, ceiling(seq_along(pending) / 100))
   left <- list()
-  for (ch in chunks) {
+  for (i in seq_along(chunks)) {
+    ch <- chunks[[i]]
     resp <- tryCatch(
       als_http_json(
         cfg, "POST", "/api/v1/als/tiles/report",
@@ -223,20 +289,47 @@ als_report_flush <- function(cfg, pending, say_fn = message) {
       msg <- if (!is.null(resp$body$error)) as.character(resp$body$error) else resp$raw
       say_fn("AVISO ALS report falhou (HTTP ", resp$status, "): ", msg)
       left <- c(left, ch)
+      # Offline/5xx: keep the rest of the queue for later instead of hammering.
+      if (als_is_transient_http(resp$status)) {
+        if (i < length(chunks)) {
+          for (j in (i + 1L):length(chunks)) left <- c(left, chunks[[j]])
+        }
+        break
+      }
     } else {
       say_fn("ALS report: ", length(ch), " tile(s) enviados.")
     }
   }
-  list(pending = left, ok = !length(left))
+  list(pending = als_queue_dedupe(left), ok = !length(left))
 }
 
-als_buffer_push <- function(cfg, pending, payload, say_fn = message) {
+# Merge memory + disk queue, try flush; leftovers stay on disk for next chance.
+als_flush_with_queue <- function(cfg, out_dir, pending = list(), say_fn = message) {
+  if (!isTRUE(cfg$enabled)) return(list())
+  queued <- als_queue_load(out_dir)
+  all <- als_queue_dedupe(c(queued, pending))
+  if (!length(all)) return(list())
+  say_fn("ALS flush (", length(all), " tile(s); fila local + memoria)...")
+  out <- als_report_flush(cfg, all, say_fn = say_fn)
+  als_queue_save(out_dir, out$pending, say_fn = say_fn)
+  if (isTRUE(out$ok)) {
+    say_fn("ALS: fila local vazia (site em dia).")
+  } else {
+    say_fn("ALS: sem internet/API; resultados ficam na fila local ate a proxima tentativa.")
+  }
+  out$pending
+}
+
+als_buffer_push <- function(cfg, pending, payload, say_fn = message, out_dir = NULL) {
   pending <- c(pending, list(payload))
   code <- suppressWarnings(as.integer(payload$status_code %||% NA_integer_))
   # Terminal outcomes flush immediately so other PCs see the truth without delay.
   flush_now <- identical(code, 1L) || identical(code, 2L) || identical(code, 4L) ||
     length(pending) >= cfg$report_every
   if (flush_now) {
+    if (!is.null(out_dir) && nzchar(as.character(out_dir %||% ""))) {
+      return(als_flush_with_queue(cfg, out_dir, pending, say_fn = say_fn))
+    }
     out <- als_report_flush(cfg, pending, say_fn = say_fn)
     return(out$pending)
   }
