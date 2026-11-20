@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.8-lastools"
+VERSION <- "1.3.9-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -337,7 +337,8 @@ help_text <- function() {
     "  --nas-dir DIR          Copia produtos p/ NAS (ex. O:/ALS_IGC). Vazio = desliga.",
     "  --nas-delete-local     Apos copia OK no NAS, apaga pasta em OUT_DIR/processed (padrao off)",
     "  --no-nas-delete-local",
-    "  --delete-laz-on-ok     Apaga .laz em LAZ_DIR quando status 1 (padrao on)",
+    "  --delete-laz-on-ok     Apaga .laz em LAZ_DIR quando status 1 (padrao on;",
+    "                        no inicio faz catch-up dos ja processados)",
     "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
     "Parar: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
@@ -2010,6 +2011,64 @@ maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
   invisible(ok)
 }
 
+# Apaga .laz de tiles ja processados (produtos OK em processed/) que ainda
+# estao em LAZ_DIR — catch-up de rodadas anteriores com DELETE_LAZ_ON_OK.
+laz_catchup <- function(opt, paths, registry, plan = NULL) {
+  if (!isTRUE(opt$delete_laz_on_ok)) return(invisible(0L))
+  if (!dir.exists(opt$laz_dir)) return(invisible(0L))
+
+  map <- new.env(parent = emptyenv())
+  add_map <- function(tid, lp) {
+    tid <- toupper(trimws(as.character(tid %||% "")))
+    lp <- as.character(lp %||% "")
+    if (!nzchar(tid) || !nzchar(lp)) return(invisible(NULL))
+    if (!exists(tid, envir = map, inherits = FALSE)) assign(tid, lp, envir = map)
+    invisible(NULL)
+  }
+
+  if (!is.null(registry) && nrow(registry)) {
+    for (i in seq_len(nrow(registry))) {
+      if (!identical(as.character(registry$status[[i]]), "processed")) next
+      add_map(registry$tile_id[[i]], registry$laz_path[[i]])
+    }
+  }
+  if (!is.null(plan) && nrow(plan)) {
+    skip <- plan[acao == "pular"]
+    if (nrow(skip)) {
+      for (i in seq_len(nrow(skip))) add_map(skip$tile_id[[i]], skip$laz_path[[i]])
+    }
+  }
+
+  tiles <- list_tile_dirs(paths$processed)
+  if (!length(tiles)) return(invisible(0L))
+  say("LAZ catch-up: conferindo ", length(tiles), " pasta(s) em processed/...")
+  n_del <- 0L
+  for (k in tiles) {
+    if (!nas_products_ok(k)) next
+    tid <- toupper(basename(k))
+    lp <- if (exists(tid, envir = map, inherits = FALSE)) {
+      get(tid, envir = map, inherits = FALSE)
+    } else {
+      ""
+    }
+    if (!nzchar(lp) || !file.exists(lp)) {
+      cands <- file.path(
+        opt$laz_dir,
+        c(
+          paste0(tid, ".laz"), paste0(tid, ".las"),
+          paste0(tolower(tid), ".laz"), paste0(tolower(tid), ".las")
+        )
+      )
+      hit <- cands[file.exists(cands)]
+      lp <- if (length(hit)) hit[[1]] else ""
+    }
+    if (!nzchar(lp) || !file.exists(lp)) next
+    if (maybe_delete_laz(lp, opt$laz_dir, TRUE)) n_del <- n_del + 1L
+  }
+  say("LAZ catch-up: ", n_del, " arquivo(s) removido(s).")
+  invisible(n_del)
+}
+
 nas_init <- function(opt) {
   env <- new.env(parent = emptyenv())
   env$enabled <- nzchar(opt$nas_dir)
@@ -2663,10 +2722,11 @@ main <- function() {
 
   fila <- if (is.null(plan)) plan else plan[acao == "processar"]
   if (is.null(fila) || !nrow(fila)) {
-    # Mesmo sem tile novo: sincroniza processed/ -> NAS (rodadas anteriores).
+    # Mesmo sem tile novo: catch-up NAS + limpeza LAZ (rodadas anteriores).
     nas <- nas_init(opt)
     on.exit(nas_shutdown(nas, paths), add = TRUE)
     if (isTRUE(nas$enabled)) nas_catchup(nas, paths, registry, idx)
+    laz_catchup(opt, paths, registry, plan)
     nas_shutdown(nas, paths)
     if (artic_ok && nrow(registry)) {
       rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
@@ -2718,6 +2778,7 @@ main <- function() {
   if (isTRUE(nas$enabled)) {
     nas_catchup(nas, paths, registry, idx)
   }
+  laz_catchup(opt, paths, registry, plan)
   meta_base <- NULL
   if (nzchar(opt$metadata)) {
     say("Sobrescrevendo campos do template com --metadata: ", opt$metadata)
