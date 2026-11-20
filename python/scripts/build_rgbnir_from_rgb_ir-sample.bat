@@ -3,6 +3,12 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 title RGBNIR  E:\RGB + F:\IR  -^>  G:\RGBNIR
 chcp 65001 >nul
+
+REM =====================================================================
+REM  Copie para: build_rgbnir_from_rgb_ir.bat  (local, fora do git)
+REM  Edite a copia (caminhos E:/F:/G: etc.).
+REM =====================================================================
+
 set "PYTHONUNBUFFERED=1"
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
