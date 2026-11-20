@@ -5957,10 +5957,10 @@ process.dataset = function(name_job, type_file, dir_dataset, dir_processed, tmpd
       
       if(!(length(file_summary_current) == 0 | length(file_summary_current) < length(dirs_current) | force.recompute == T)){
         cat(i,"| Skipping:", dir_current$path_input," (already processed) | Time:", as.character(format(time_start,"%d/%m/%Y %Hh%M")),"\n")
-        information_processing[i]$status = "already processed"
+        information_processing[i, status := "already processed"]
       } else if(skip.pattern == T){
         cat(i,"| Skipping:", dir_current$path_input," (path matches patterns_skipped) | Time:", as.character(format(time_start,"%d/%m/%Y %Hh%M")),"\n")
-        information_processing[i]$status = "path matches patterns_skipped"
+        information_processing[i, status := "path matches patterns_skipped"]
       } else {
         cat(i,"| Processing:", dir_current$path_input," | Time:", as.character(format(time_start,"%d/%m/%Y %Hh%M")),"\n")
         # remove old files
@@ -6003,16 +6003,18 @@ process.dataset = function(name_job, type_file, dir_dataset, dir_processed, tmpd
           }
         )
 
-        information_processing[i]$status = status
+        # NULL via `$<-` no data.table vira "Supplied 9 columns to be assigned 8 items"
+        if (is.null(status)) status = "error"
+        information_processing[i, status := as.character(status)]
       } 
 
       time_end = Sys.time()
       time_processing = difftime(time_end,time_start,units = "mins")
 
       # append to the general output files
-      information_processing[i]$time_start = as.character(format(time_start,"%d/%m/%Y %Hh%M"))
-      information_processing[i]$time_end = as.character(format(time_end,"%d/%m/%Y %Hh%M"))
-      information_processing[i]$time_processing_minutes = as.character(round(time_processing))
+      information_processing[i, time_start := as.character(format(time_start,"%d/%m/%Y %Hh%M"))]
+      information_processing[i, time_end := as.character(format(time_end,"%d/%m/%Y %Hh%M"))]
+      information_processing[i, time_processing_minutes := as.character(round(as.numeric(time_processing)))]
 
       # v.1.0.0 remove default printing of job summary. Since jobs can be run at different levels, this might be confusing. Summary information is included for each geo-unit anyways
       if(print.summary_job == T){

@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.9-lastools"
+VERSION <- "1.3.10-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -2075,28 +2075,14 @@ nas_init <- function(opt) {
   env$root <- opt$nas_dir
   env$delete_local <- isTRUE(opt$nas_delete_local)
   env$jobs <- list()
-  env$old_plan <- NULL
-  env$use_future <- FALSE
   env$done <- FALSE
+  # Copia em background via robocopy wait=FALSE (nao usa future::plan —
+  # multisession global competia com o pipeline / lidR).
   if (env$enabled) {
     if (!dir.exists(env$root)) {
       say("AVISO NAS: pasta nao acessivel agora: ", env$root, " (copias ficam para quando montar)")
     } else {
       say("NAS: ", env$root, " | apagar local apos copia: ", env$delete_local)
-    }
-    if (requireNamespace("future", quietly = TRUE)) {
-      env$old_plan <- future::plan()
-      ok_plan <- TRUE
-      tryCatch(
-        future::plan(future::multisession, workers = 2L),
-        error = function(e) {
-          say("AVISO NAS: future multisession falhou; copia sincrona. ", conditionMessage(e))
-          ok_plan <<- FALSE
-        }
-      )
-      env$use_future <- isTRUE(ok_plan)
-    } else {
-      say("AVISO NAS: pacote future ausente; copia sincrona.")
     }
   }
   env
@@ -2127,27 +2113,36 @@ nas_finish_one <- function(res, paths, say_fn = say) {
 
 `%||%` <- function(a, b) if (is.null(a) || (length(a) == 1L && is.na(a))) b else a
 
-nas_reap <- function(nas, paths, wait = FALSE) {
+nas_reap <- function(nas, paths, wait = FALSE, timeout_min = 120) {
   if (!isTRUE(nas$enabled) || !length(nas$jobs)) return(invisible(NULL))
   keep <- list()
   for (job in nas$jobs) {
-    fut <- job$fut
-    ready <- isTRUE(wait) || (!is.null(fut) && isTRUE(future::resolved(fut))) || is.null(fut)
-    if (!ready) {
+    ok_now <- nas_products_ok(job$dest)
+    elapsed <- as.numeric(difftime(Sys.time(), job$t0, units = "mins"))
+    if (is.na(elapsed)) elapsed <- 0
+    if (!ok_now && isTRUE(wait)) {
+      while (!nas_products_ok(job$dest) &&
+             as.numeric(difftime(Sys.time(), job$t0, units = "mins")) < timeout_min) {
+        Sys.sleep(2)
+      }
+      ok_now <- nas_products_ok(job$dest)
+      elapsed <- as.numeric(difftime(Sys.time(), job$t0, units = "mins"))
+    }
+    timed_out <- !ok_now && elapsed >= timeout_min
+    if (!ok_now && !timed_out) {
       keep[[length(keep) + 1L]] <- job
       next
     }
-    res <- if (!is.null(fut)) {
-      tryCatch(future::value(fut), error = function(e) {
-        list(
-          ok = FALSE, tile_id = job$tile_id, src = job$src, dest = job$dest,
-          delete_local = job$delete_local, erro = conditionMessage(e)
+    nas_finish_one(
+      list(
+        ok = ok_now, tile_id = job$tile_id, src = job$src, dest = job$dest,
+        delete_local = job$delete_local,
+        erro = if (ok_now) "" else paste0(
+          "copia NAS incompleta apos ", round(elapsed, 1), " min"
         )
-      })
-    } else {
-      job$result
-    }
-    nas_finish_one(res, paths)
+      ),
+      paths
+    )
   }
   nas$jobs <- keep
   invisible(NULL)
@@ -2181,30 +2176,33 @@ nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
   src_n <- src
   dest_n <- dest
   tid <- toupper(tile_id)
-  if (isTRUE(nas$use_future)) {
-    # Corpo auto-contido: worker multisession nao herda funcoes do script.
-    fut <- future::future({
-      src_w <- normalizePath(src_n, winslash = "\\", mustWork = TRUE)
-      dest_w <- chartr("/", "\\", gsub("\\\\", "/", dest_n))
-      dir.create(dest_n, recursive = TRUE, showWarnings = FALSE)
-      rc <- suppressWarnings(system2(
-        "robocopy",
-        c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
-        stdout = FALSE,
-        stderr = FALSE
-      ))
-      ok_rc <- !is.na(rc) && rc < 8L
-      info <- list.files(dest_n, pattern = "_INFO_summary_processing\\.csv$", recursive = TRUE)
-      err <- list.files(dest_n, pattern = "^_ERROR\\.txt$", recursive = TRUE)
-      ok <- isTRUE(ok_rc) && length(info) > 0L && length(err) == 0L
-      list(
-        ok = ok, tile_id = tid, src = src_n, dest = dest_n,
-        delete_local = delete_local,
-        erro = if (ok) "" else paste0("robocopy rc=", as.character(rc), " ou sem _INFO no destino")
-      )
-    }, seed = NULL)
+  launched <- FALSE
+  if (.Platform$OS.type == "windows") {
+    src_w <- normalizePath(src_n, winslash = "\\", mustWork = TRUE)
+    dest_w <- chartr("/", "\\", gsub("\\\\", "/", dest_n))
+    dir.create(dest_n, recursive = TRUE, showWarnings = FALSE)
+    # Background: nao bloqueia o proximo tile; sem future::plan.
+    tryCatch(
+      {
+        base::system2(
+          "robocopy",
+          c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
+          stdout = FALSE,
+          stderr = FALSE,
+          wait = FALSE
+        )
+        launched <- TRUE
+      },
+      error = function(e) {
+        say("AVISO NAS: falha ao iniciar robocopy: ", conditionMessage(e))
+        launched <<- FALSE
+      }
+    )
+  }
+  if (isTRUE(launched)) {
     nas$jobs[[length(nas$jobs) + 1L]] <- list(
-      fut = fut, tile_id = tid, src = src_n, dest = dest_n, delete_local = delete_local
+      tile_id = tid, src = src_n, dest = dest_n,
+      delete_local = delete_local, t0 = Sys.time()
     )
   } else {
     ok <- tryCatch(nas_copy_tree(src_n, dest_n), error = function(e) FALSE)
@@ -2225,10 +2223,6 @@ nas_shutdown <- function(nas, paths) {
   if (length(nas$jobs)) {
     say("NAS: aguardando ", length(nas$jobs), " copia(s) em andamento...")
     nas_reap(nas, paths, wait = TRUE)
-  }
-  if (!is.null(nas$old_plan)) {
-    try(future::plan(nas$old_plan), silent = TRUE)
-    nas$old_plan <- NULL
   }
   nas$done <- TRUE
   invisible(NULL)
