@@ -14,6 +14,7 @@ Standalone **CLI** Python (`python script.py`). PyQGIS scripts live in [`python/
 |:-----|:--------|
 | `transferir_laz_rgb_ir_v3_por_aoi.py` | Copy IGC-SP LAZ/RGB/IR tiles by intersecting any AOI (shp/geojson/gpkg/kml/kmz) with the merged articulation in `data/articulacao_igc_sp/`. Optional coverage GeoPackage output. |
 | `build_rgbnir_from_rgb_ir.py` | Fuse RGB bands 1–3 with IR band 1 into a 4-band RGBNIR GeoTIFF. IR is nearest-neighbor resampled onto the RGB grid. Tiles whose header bounds do not intersect the matching layer of `data/sp-bounds.gpkg` (`epsg31982` or `epsg31983`, no reprojection) are skipped. That check is saved in `rgbnir_sp_vistoria.csv` and reused; set `FORCE_SP_VISTORIA = True` or pass `--force-sp` to run it again. Output keeps the original name when the grids match, and adds `-resampled` only when the IR grid has to be aligned. Default folders on the lab machine: `E:\RGB`, `F:\IR`, `G:\RGBNIR`. Resume-safe (skips outputs already on disk). Writes `rgbnir_summary.csv`, `rgbnir_registry.csv` and a column dictionary into the output folder. Double-click `build_rgbnir_from_rgb_ir.bat`. |
+| `stage_external_laz_tif.py` | Copy a quota of `.laz` / `.tif` tiles from an external disk into a local folder. `--max-files` and `--max-gb` are independent: set one, the other, or neither (neither copies every file that is still pending). Names already in the destination do not count toward the quota. Tiles with `lidar_proc=1` on [leucaena.earth](https://leucaena.earth) are skipped, using `ALS_MACHINE_TOKEN` and the registry CSV export (same host and `X-ALS-Token` header as the GeoTrees R client). Standard library only. Double-click `stage_external_laz_tif.bat` (copy it from the sample; the real `.bat` is gitignored). |
 
 ```powershell
 pip install -r ../../requirements.txt
@@ -35,6 +36,16 @@ python build_rgbnir_from_rgb_ir.py --dry-run
 ```
 
 Defaults are `E:\RGB`, `F:\IR` and `G:\RGBNIR`. A second run skips GeoTIFFs already in the output folder. Open `G:\RGBNIR\rgbnir_summary.csv` for how many tiles are done and how many are still missing.
+
+Stage a slice of the external LAZ/optical archive (token comes from `ALS_MACHINE_TOKEN`, not from the command line):
+
+```powershell
+python stage_external_laz_tif.py --source E:\tiles --dest C:\OUTDIR --max-files 100
+python stage_external_laz_tif.py --source E:\tiles --dest C:\OUTDIR --max-gb 40
+python stage_external_laz_tif.py --source E:\tiles --dest C:\OUTDIR --dry-run
+```
+
+Leave both limits unset to copy every file that is not already in `C:\OUTDIR` and not marked `lidar_proc=1`. Asking for 100 files when 50 names are already in the destination copies 100 other files.
 
 Older segmentation-pipeline scripts that used to live here were **moved** into the
 sibling repository so that the whole pre-processing chain lives in one place:
