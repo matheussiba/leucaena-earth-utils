@@ -1180,15 +1180,35 @@ find.clusters_data = function(params_general, path_output = "", nbclusters_force
 
       # now cluster them
       # we use igraph package to construct a graph of connected acquisitions and then extract isolated clusters
-      outlines_files = list.files(path_tmp, pattern = ".shp", full.names = T)
+      outlines_files = list.files(path_tmp, pattern = "\\.shp$", full.names = T)
       # read in generated shapefiles and connect them back to the las files
       outlines_input = lapply(outlines_files,function(x){y = suppressWarnings(vect(x));y$files = gsub(".shp",paste0(".",params_general$type_file),x, fixed = T);if(nrow(geom(y)) > 0){return(y)}else{return(NULL)}})
       outlines_input = outlines_input[which(!sapply(outlines_input, is.null))] # remove NULL elements
+
+      # Sem shapefiles do lasboundary: antes virava "subscript out of bounds" opaco.
+      if(length(outlines_input) == 0){
+        n_in = length(files_tocluster)
+        n_thin = length(list.files(path_tmp, pattern = "\\.(laz|las)$", full.names = TRUE, ignore.case = TRUE))
+        stop(
+          "lasboundary nao gerou outline (0 shapefile valido). ",
+          "Input .", params_general$type_file, ": ", n_in,
+          " | apos lasthin em tmp: ", n_thin,
+          ". Cheque LAStools/licenca, se o .laz tem pontos, e rode com --debug para ver o log do lasthin/lasboundary.",
+          call. = FALSE
+        )
+      }
 
       outlines_input = suppressWarnings(vect(outlines_input))
       # outlines_input$files = list.files(params_general$path_data,pattern = params_general$type_file, full.names = T) # deprecated, need to check whether lastools output gave back proper geometry
       buffer_outlines = params_general$buffer
       outlines_input_buffered = buffer_withsf(outlines_input, buffer_outlines) # implicitly removes invalid outlines
+      if(is.null(outlines_input_buffered) || nrow(outlines_input_buffered) == 0){
+        stop(
+          "outlines do lasboundary ficaram invalidos apos buffer. ",
+          "Rode com --debug e confira o .laz de entrada.",
+          call. = FALSE
+        )
+      }
       
       # cluster
       outlines_adjacency = relate(outlines_input_buffered, outlines_input_buffered,"intersects")

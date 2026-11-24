@@ -1,4 +1,4 @@
-# Batch GeoTrees ALS (LAStools) — um tile por vez, com retomada
+# Batch GeoTrees ALS (LAStools) � um tile por vez, com retomada
 #
 # Envolve ALS_processing_helperfunctions_v.1.0.4.R / process.dataset com
 # path_lastools preenchido. Para cada .laz/.las:
@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.5.0-lastools"
+VERSION <- "1.5.2-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -267,7 +267,7 @@ parse_bool_loose <- function(val, default = FALSE) {
   key <- tolower(trimws(as.character(val[[1]])))
   if (!nzchar(key)) return(default)
   if (key %in% c("1", "true", "t", "yes", "y", "sim")) return(TRUE)
-  if (key %in% c("0", "false", "f", "no", "n", "nao", "não")) return(FALSE)
+  if (key %in% c("0", "false", "f", "no", "n", "nao", "n�o")) return(FALSE)
   default
 }
 
@@ -285,7 +285,7 @@ num_arg <- function(val, nome) {
 
 normalize_force_utm <- function(val) {
   key <- tolower(trimws(val))
-  if (key %in% c("false", "f", "0", "nao", "não")) return(FALSE)
+  if (key %in% c("false", "f", "0", "nao", "n�o")) return(FALSE)
   if (key %in% c("true", "t", "1", "sim")) return(TRUE)
   if (key %in% c("from_metadata", "metadata")) return("from_metadata")
   stop(
@@ -296,7 +296,7 @@ normalize_force_utm <- function(val) {
 
 help_text <- function() {
   c(
-    "batch_geotrees_als_lastools.R — GeoTrees ALS por tile via LAStools",
+    "batch_geotrees_als_lastools.R � GeoTrees ALS por tile via LAStools",
     "",
     "Opcoes:",
     "  --laz-dir DIR         Pasta dos .laz/.las (padrao D:/laz). Recursivo.",
@@ -962,6 +962,26 @@ fill_laz_from_plan <- function(registry, plan) {
 # Plano
 # ---------------------------------------------------------------------------
 
+# Contagem rapida (sem file.info) para invalidar o indice se a pasta mudou.
+count_lidar_quick <- function(root, out_dir) {
+  if (!nzchar(root) || !dir.exists(root)) return(0L)
+  root_n <- normalizePath(root, winslash = "/", mustWork = TRUE)
+  root_out <- normalizePath(out_dir, winslash = "/", mustWork = FALSE)
+  skip_prefix <- tolower(paste0(root_out, "/"))
+  files <- list.files(
+    root_n, pattern = "\\.(laz|las)$", recursive = TRUE,
+    full.names = TRUE, ignore.case = TRUE
+  )
+  if (!length(files)) return(0L)
+  files <- suppressWarnings(normalizePath(files, winslash = "/", mustWork = FALSE))
+  files <- files[
+    nzchar(files) &
+      tolower(files) != tolower(root_out) &
+      !startsWith(tolower(files), skip_prefix)
+  ]
+  as.integer(length(files))
+}
+
 list_lidar <- function(root, out_dir) {
   say("Listando .laz/.las em ", root)
   say_debug("A pasta inteira e percorrida antes do filtro de BLOCO. Cada pasta aparece abaixo.")
@@ -1049,18 +1069,22 @@ dedupe_lidar <- function(files) {
   list(dt = files_dt, n_dup = n_dup)
 }
 
-save_laz_index <- function(path, meta_path, inv, laz_dir) {
+save_laz_index <- function(path, meta_path, inv, laz_dir, n_brutos = NA_integer_) {
   atomic_write(path, function(tmp) data.table::fwrite(inv$dt, tmp, bom = TRUE))
+  if (is.na(n_brutos) || n_brutos < 0L) {
+    n_brutos <- as.integer(nrow(inv$dt) + inv$n_dup)
+  }
   meta <- data.table::data.table(
     laz_dir = laz_dir,
     n_arquivos = nrow(inv$dt),
     n_dup = inv$n_dup,
+    n_brutos = as.integer(n_brutos),
     gravado_utc = utc_now()
   )
   atomic_write(meta_path, function(tmp) data.table::fwrite(meta, tmp, bom = TRUE))
 }
 
-load_laz_index <- function(path, meta_path, laz_dir) {
+load_laz_index <- function(path, meta_path, laz_dir, n_brutos_agora = NA_integer_) {
   if (!file.exists(path) || !file.exists(meta_path)) return(NULL)
   meta <- tryCatch(
     data.table::fread(meta_path, colClasses = "character", encoding = "UTF-8", showProgress = FALSE),
@@ -1069,6 +1093,21 @@ load_laz_index <- function(path, meta_path, laz_dir) {
   if (is.null(meta) || !nrow(meta) || !all(c("laz_dir", "n_dup") %in% names(meta))) return(NULL)
   if (!identical(tolower(meta$laz_dir[[1]]), tolower(laz_dir))) {
     say("O indice de LAZ salvo e de outra pasta. Vou ler ", laz_dir, " de novo.")
+    return(NULL)
+  }
+  n_meta <- suppressWarnings(as.integer(meta$n_brutos[[1]]))
+  if (is.na(n_meta) && "n_arquivos" %in% names(meta)) {
+    # Indice antigo: so tinha unicos; se a pasta tem bem mais arquivos, revarre.
+    n_uni <- suppressWarnings(as.integer(meta$n_arquivos[[1]]))
+    n_dup_m <- suppressWarnings(as.integer(meta$n_dup[[1]]))
+    if (is.na(n_dup_m)) n_dup_m <- 0L
+    if (!is.na(n_uni)) n_meta <- n_uni + n_dup_m
+  }
+  if (!is.na(n_brutos_agora) && !is.na(n_meta) && as.integer(n_brutos_agora) != as.integer(n_meta)) {
+    say(
+      "Pasta LAZ mudou desde o indice (", n_meta, " -> ", n_brutos_agora,
+      " arquivo(s)). Vou ler de novo."
+    )
     return(NULL)
   }
   dt <- tryCatch(
@@ -1088,9 +1127,9 @@ load_laz_index <- function(path, meta_path, laz_dir) {
   }
   n_dup <- suppressWarnings(as.integer(meta$n_dup[[1]]))
   if (is.na(n_dup)) n_dup <- 0L
-  say("Indice de LAZ da primeira leitura: ", nrow(dt), " tile(s). O tamanho nao sera lido de novo.")
+  say("Indice de LAZ reutilizado: ", nrow(dt), " tile(s) unicos (pasta ainda com ",
+      if (is.na(n_brutos_agora)) "?" else n_brutos_agora, " arquivo(s)).")
   say("  ", path)
-  say("Para forcar outra leitura da pasta, apague esse arquivo.")
   list(dt = dt, n_dup = n_dup)
 }
 
@@ -1472,7 +1511,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
   )
 
   linhas <- c(
-    "# Relatorio — GeoTrees ALS por tile",
+    "# Relatorio � GeoTrees ALS por tile",
     "",
     sprintf("**Status:** %s  ", titulo_modo),
     sprintf("**Atualizado (UTC):** %s  ", utc_now()),
@@ -1771,33 +1810,29 @@ issue_text <- function(logfile) {
 # >nul fica dentro do bat; CreateProcess sozinho ignora >nul).
 quiet_system_cmd <- function(command, intern = FALSE) {
   if (isTRUE(intern)) {
-    return(list(cmd = as.character(command[[1]]), bat = NULL))
+    return(list(cmd = as.character(command[[1]]), bat = NULL, via = "raw"))
   }
   cmd <- as.character(command[[1]])
   if (.Platform$OS.type == "windows") {
-    if (grepl("^\\s*cmd\\s+/c\\b", cmd, ignore.case = TRUE) &&
-        grepl(">nul\\s+2>&1|>NUL\\s+2>&1", cmd, ignore.case = TRUE)) {
-      return(list(cmd = cmd, bat = NULL))
-    }
+    # Nao embutir >nul na mesma linha do LAStools: aspas + redirect no .bat
+    # ainda quebram o glob "*.laz" em alguns hosts. O silenciamento fica no
+    # system2(stdout/stderr=FALSE); o .bat so carrega a linha intacta.
     bat <- tempfile(pattern = "geotrees_quiet_", fileext = ".bat")
     writeLines(
       c(
         "@echo off",
         "setlocal EnableExtensions DisableDelayedExpansion",
-        paste(cmd, ">nul 2>&1")
+        cmd
       ),
       bat,
       useBytes = TRUE
     )
-    return(list(
-      cmd = paste("cmd /c", shQuote(bat, type = "cmd")),
-      bat = bat
-    ))
+    return(list(cmd = cmd, bat = bat, via = "bat"))
   }
   if (!grepl(">/dev/null", cmd, fixed = TRUE)) {
     cmd <- paste(cmd, ">/dev/null 2>&1")
   }
-  list(cmd = cmd, bat = NULL)
+  list(cmd = cmd, bat = NULL, via = "unix")
 }
 
 install_quiet_system <- function(debug = FALSE) {
@@ -1812,7 +1847,7 @@ install_quiet_system <- function(debug = FALSE) {
     return(invisible(FALSE))
   }
   # Override system()/system2() used by the official helper so LAStools spam
-  # never hits the console (bat redirect; show.output.on.console is not enough).
+  # never hits the console. Windows: .bat com a linha intacta + system2 mudo.
   assign("system", function(command, intern = FALSE, wait = TRUE, input = NULL,
                             show.output.on.console = TRUE, minimized = FALSE,
                             invisible = TRUE, timeout = 0, ...) {
@@ -1822,6 +1857,18 @@ install_quiet_system <- function(debug = FALSE) {
         try(unlink(wrapped$bat), silent = TRUE)
       }
     }, add = TRUE)
+    if (.Platform$OS.type == "windows" && identical(wrapped$via, "bat") && !isTRUE(intern)) {
+      # system2 evita o mangling de aspas do system("cmd /c ...").
+      rc <- base::system2(
+        "cmd.exe",
+        c("/d", "/c", wrapped$bat),
+        stdout = FALSE,
+        stderr = FALSE,
+        wait = wait,
+        timeout = if (is.null(timeout) || !is.finite(timeout)) 0 else timeout
+      )
+      return(rc)
+    }
     if (.Platform$OS.type == "windows") {
       return(base::system(
         wrapped$cmd,
@@ -2017,7 +2064,7 @@ maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
 }
 
 # Apaga .laz de tiles ja processados (produtos OK em processed/) que ainda
-# estao em LAZ_DIR — catch-up de rodadas anteriores com DELETE_LAZ_ON_OK.
+# estao em LAZ_DIR � catch-up de rodadas anteriores com DELETE_LAZ_ON_OK.
 laz_catchup <- function(opt, paths, registry, plan = NULL) {
   if (!isTRUE(opt$delete_laz_on_ok)) return(invisible(0L))
   if (!dir.exists(opt$laz_dir)) return(invisible(0L))
@@ -2082,7 +2129,7 @@ nas_init <- function(opt) {
   env$delete_local <- isTRUE(opt$nas_delete_local)
   env$jobs <- list()
   env$done <- FALSE
-  # Copia em background via robocopy wait=FALSE (nao usa future::plan —
+  # Copia em background via robocopy wait=FALSE (nao usa future::plan �
   # multisession global competia com o pipeline / lidR).
   if (env$enabled) {
     if (!dir.exists(env$root)) {
@@ -2199,7 +2246,7 @@ nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
   }
   dest <- nas_dest_path(nas$root, layer_artic, bloco, tile_id)
   if (!nzchar(dest)) {
-    say("AVISO NAS: layer desconhecido (", layer_artic, ") para ", tile_id, " — nao copiado.")
+    say("AVISO NAS: layer desconhecido (", layer_artic, ") para ", tile_id, " � nao copiado.")
     return(invisible(FALSE))
   }
   if (nas_products_ok(dest)) {
@@ -2503,7 +2550,7 @@ pid_is_running <- function(pid) {
   if (any(grepl(sprintf("\"%d\"", pid), tl, fixed = TRUE))) return(TRUE)
   txt <- paste(c(ps, tl), collapse = " ")
   if (grepl(
-    "No tasks are running|nenhuma tarefa|Cannot find a process|nao encontrado|não encontrado",
+    "No tasks are running|nenhuma tarefa|Cannot find a process|nao encontrado|n�o encontrado",
     txt,
     ignore.case = TRUE
   )) {
@@ -2643,6 +2690,16 @@ main <- function() {
 
   # Registro so em GPKG; a cada rodada comeca zerado a partir de processed/.
   cleanup_legacy_outdir(paths$root)
+  if (!opt$dry_run && !opt$report_only) {
+    n_log <- 0L
+    if (dir.exists(paths$logs)) {
+      old_logs <- list.files(paths$logs, full.names = TRUE, all.files = TRUE, no.. = TRUE)
+      n_log <- length(old_logs)
+      if (n_log) unlink(old_logs, recursive = TRUE, force = TRUE)
+    }
+    dir.create(paths$logs, recursive = TRUE, showWarnings = FALSE)
+    if (n_log > 0L) say("Logs: limpei ", n_log, " arquivo(s) antigo(s) em logs/ (so desta rodada).")
+  }
   say("Registro: zerado nesta rodada; fonte = pastas OK em processed/ (+ GPKG no fim).")
   registry <- empty_registry()
   if (!opt$dry_run && !opt$report_only) {
@@ -2675,13 +2732,21 @@ main <- function() {
   if (!opt$report_only || dir.exists(opt$laz_dir)) {
     if (dir.exists(opt$laz_dir)) {
       laz_dir_n <- normalizePath(opt$laz_dir, winslash = "/", mustWork = TRUE)
-      inv <- load_laz_index(paths$laz_index, paths$laz_index_meta, laz_dir_n)
+      n_laz_agora <- count_lidar_quick(laz_dir_n, paths$root)
+      say("Arquivos .laz/.las na pasta agora: ", n_laz_agora)
+      inv <- load_laz_index(
+        paths$laz_index, paths$laz_index_meta, laz_dir_n,
+        n_brutos_agora = n_laz_agora
+      )
       if (is.null(inv)) {
-        say("Primeira leitura desta pasta de LAZ. As proximas rodadas usam o indice gravado.")
+        say("Lendo pasta de LAZ (indice ausente, de outra pasta, ou pasta mudou)...")
         files <- list_lidar(laz_dir_n, paths$root)
         inv <- dedupe_lidar(files)
-        save_laz_index(paths$laz_index, paths$laz_index_meta, inv, laz_dir_n)
-        say("Indice de LAZ gravado. Na proxima rodada o tamanho dos arquivos nao e lido de novo.")
+        save_laz_index(
+          paths$laz_index, paths$laz_index_meta, inv, laz_dir_n,
+          n_brutos = length(files)
+        )
+        say("Indice de LAZ gravado: ", nrow(inv$dt), " unicos / ", length(files), " brutos.")
         say("  ", paths$laz_index)
       }
       plan <- make_plan(
@@ -3000,6 +3065,12 @@ main <- function() {
       if (!isTRUE(claim$claimed)) {
         say("ALS claim pulou ", meta$tile_id, ": ", claim$reason)
         log_line(paths$runlog, sprintf("[%d/%d] PULADO (API) %s | %s", i, n_fila, meta$tile_id, claim$reason))
+        # Ja feito na API (outra maquina / rodada): apaga .laz local se ainda existir.
+        if (isTRUE(opt$delete_laz_on_ok) &&
+            grepl("already_done|already done|status\\s*1|done", claim$reason, ignore.case = TRUE)) {
+          lp_del <- resolve_laz_path(meta$tile_id, opt$laz_dir, meta$laz_path)
+          maybe_delete_laz(lp_del, opt$laz_dir, TRUE)
+        }
         next
       }
       if (!isTRUE(claim$ok) && isTRUE(claim$soft)) {
