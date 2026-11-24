@@ -69,10 +69,9 @@ set "DELETE_LAZ_ON_OK=true"
 REM true  = SP + fora; processa sp_inside=TRUE primeiro, depois FALSE
 REM false = so tiles com sp_inside=TRUE (dentro de SP)
 set "OUT_SP=true"
-REM SKIP_HOLES: pula tile se buraco interior (cobertura) >= N hectares.
-REM   20 = padrao (pula buracos >= 20 ha). 6 = >= 6 ha. 15 = >= 15 ha.
-REM   vazio = nao checa / nao pula buracos (--no-skip-holes).
-REM Checagem superfast (grade 250 m), como batch_check_laz_holes.py --superfast.
+REM SKIP_HOLES: na hora de processar CADA tile, pula se buraco interior >= N ha.
+REM   20 = padrao. 6 = >= 6 ha. 15 = >= 15 ha. vazio = desliga (--no-skip-holes).
+REM Superfast por tile (grade 250 m); nao varre a fila inteira no inicio.
 set "SKIP_HOLES=20"
 REM =====================================================================
 
