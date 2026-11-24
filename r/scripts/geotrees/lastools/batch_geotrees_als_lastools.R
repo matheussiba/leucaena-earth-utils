@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.6.3-lastools"
+VERSION <- "1.6.4-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -94,7 +94,9 @@ default_opt <- function() {
     # Apaga o .laz em LAZ_DIR quando o tile fecha com status 1
     delete_laz_on_ok = TRUE,
     # TRUE = SP + fora (sp_inside=TRUE primeiro, depois FALSE); FALSE = so SP
-    out_sp = TRUE
+    out_sp = TRUE,
+    # Ha: pula tile se buraco interior (superfast) >= este valor. NA = desliga.
+    skip_holes = 20
   )
 }
 
@@ -106,14 +108,15 @@ parse_cli <- function(argv) {
     "--als-soft-fail", "--debug", "--no-debug",
     "--nas-delete-local", "--no-nas-delete-local",
     "--delete-laz-on-ok", "--no-delete-laz-on-ok",
-    "--out-sp", "--no-out-sp"
+    "--out-sp", "--no-out-sp",
+    "--no-skip-holes"
   )
   valued <- c(
     "--laz-dir", "--bloco", "--out-dir", "--articulacao", "--articulacao-layer",
     "--n-cores", "--resolution", "--size-tile", "--size-buffer", "--limit",
     "--name-job", "--metadata", "--force-utm", "--path-lastools", "--max-hours",
     "--als-api-url", "--als-api-token", "--als-report-every", "--als-lease-seconds",
-    "--nas-dir"
+    "--nas-dir", "--skip-holes"
   )
   i <- 1L
   while (i <= length(argv)) {
@@ -208,6 +211,11 @@ parse_cli <- function(argv) {
       i <- i + 1L
       next
     }
+    if (a == "--no-skip-holes") {
+      opt$skip_holes <- NA_real_
+      i <- i + 1L
+      next
+    }
     if (!a %in% valued) {
       stop(
         "Argumento desconhecido: ", a,
@@ -238,6 +246,14 @@ parse_cli <- function(argv) {
     if (a == "--als-report-every") opt$als_report_every <- as.integer(num_arg(val, a))
     if (a == "--als-lease-seconds") opt$als_lease_seconds <- as.integer(num_arg(val, a))
     if (a == "--nas-dir") opt$nas_dir <- val
+    if (a == "--skip-holes") {
+      key <- tolower(trimws(as.character(val)))
+      if (!nzchar(key) || key %in% c("na", "none", "off", "no", "nao", "n")) {
+        opt$skip_holes <- NA_real_
+      } else {
+        opt$skip_holes <- num_arg(val, a)
+      }
+    }
   }
   opt$force_utm <- normalize_force_utm(opt$force_utm)
   if (!is.na(opt$n_cores) && opt$n_cores < 1L) {
@@ -274,6 +290,24 @@ parse_cli <- function(argv) {
   env_out_sp <- Sys.getenv("OUT_SP", "")
   if (nzchar(env_out_sp) && !any(argv %in% c("--out-sp", "--no-out-sp"))) {
     opt$out_sp <- parse_bool_loose(env_out_sp, default = FALSE)
+  }
+  if (!any(argv %in% c("--skip-holes", "--no-skip-holes"))) {
+    env_holes <- Sys.getenv("SKIP_HOLES", "")
+    if (nzchar(trimws(env_holes))) {
+      key <- tolower(trimws(env_holes))
+      if (key %in% c("na", "none", "off", "no", "nao", "n")) {
+        opt$skip_holes <- NA_real_
+      } else {
+        opt$skip_holes <- suppressWarnings(as.numeric(env_holes))
+      }
+    }
+  }
+  if (!is.null(opt$skip_holes) && length(opt$skip_holes) && !is.na(opt$skip_holes)) {
+    if (!is.finite(opt$skip_holes) || opt$skip_holes <= 0) {
+      opt$skip_holes <- NA_real_
+    }
+  } else {
+    opt$skip_holes <- NA_real_
   }
   opt$nas_dir <- gsub("\\\\", "/", trimws(as.character(opt$nas_dir)))
   opt$nas_dir <- sub("/+$", "", opt$nas_dir)
@@ -359,6 +393,10 @@ help_text <- function() {
     "                        no inicio: catch-up local + API lidar_proc=1)",
     "  --out-sp / --no-out-sp Padrao --out-sp: SP + fora; fila faz sp_inside=TRUE",
     "                        primeiro e so depois sp_inside=FALSE. --no-out-sp = so SP.",
+    "  --skip-holes HA       Pula tile se buraco interior >= HA hectares (padrao 20).",
+    "                        Checagem superfast (grade 250 m, 1/20 pontos), como",
+    "                        python/scripts/batch_check_laz_holes.py --superfast.",
+    "  --no-skip-holes       Desliga a checagem (equiv. SKIP_HOLES vazio no .bat).",
     "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
     "Parar: STOP.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
@@ -1365,6 +1403,7 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L,
   plan[acao == "fora_de_sp", motivo := "fora de SP (sp_inside=FALSE; use --out-sp)"]
   plan[acao == "adiado_limit", motivo := "alem do --limit desta rodada"]
   plan[acao == "sem_crs", motivo := "sem epsg na articulacao (31982/31983)"]
+  plan[acao == "buraco_grande", motivo := "buraco interior acima de SKIP_HOLES (ha)"]
   plan[acao == "processar" & !nzchar(layer_artic), motivo := "sem ficha na articulacao"]
   attr(plan, "n_dup") <- n_dup
   n_go <- sum(plan$acao == "processar")
@@ -1652,6 +1691,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
   n_go <- if (is.null(plan)) 0L else sum(plan$acao == "processar")
   n_fora <- if (is.null(plan)) 0L else sum(plan$acao == "fora_do_bloco")
   n_lim <- if (is.null(plan)) 0L else sum(plan$acao == "adiado_limit")
+  n_buraco <- if (is.null(plan)) 0L else sum(plan$acao == "buraco_grande")
   n_sem <- if (is.null(plan)) 0L else sum(plan$acao != "fora_do_bloco" & !nzchar(plan$layer_artic))
   n_run_ok <- if (is.null(rodada) || !nrow(rodada)) 0L else sum(rodada$status == "processed")
   n_run_err <- if (is.null(rodada) || !nrow(rodada)) 0L else sum(rodada$status == "erro")
@@ -1759,6 +1799,11 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
       sprintf("- Ja processados aqui (pulados): **%d**", n_skip),
       sprintf("- Ainda nao processados: **%d** (nesta rodada: %d, alem do --limit: %d)", n_go + n_lim, n_go, n_lim),
       sprintf("- Fora do filtro de BLOCO: **%d**", n_fora),
+      sprintf(
+        "- Pulados por buraco >= SKIP_HOLES (%s ha): **%d**",
+        if (is.null(opt$skip_holes) || is.na(opt$skip_holes)) "off" else as.character(opt$skip_holes),
+        n_buraco
+      ),
       sprintf("- Sem ficha na articulacao (dentro do filtro): **%d**", n_sem),
       sprintf("- Segurados pelo --limit: **%d**", n_lim),
       if (n_dup > 0L) sprintf("- Nomes repetidos (ficou o arquivo maior): **%d**", n_dup) else NULL,
@@ -1785,6 +1830,14 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
     sprintf("- Duracao da rodada (min): %s", fmt_num(elapsed_min, 1)),
     sprintf("- Resolucao %s m | tile %s m | buffer %s m | cores %s | blast2dem %s",
             opt$resolution, opt$size_tile, opt$size_buffer, opt$n_cores, opt$use_blast2dem),
+    sprintf(
+      "- SKIP_HOLES: %s",
+      if (is.null(opt$skip_holes) || is.na(opt$skip_holes)) {
+        "desligado"
+      } else {
+        paste0(opt$skip_holes, " ha (superfast)")
+      }
+    ),
     ""
   )
 
@@ -2167,6 +2220,200 @@ append_nas_log <- function(path, row) {
 }
 
 `%||%` <- function(a, b) if (is.null(a) || (length(a) == 1L && is.na(a))) b else a
+
+# ---------------------------------------------------------------------------
+# SKIP_HOLES (superfast) ? port leve de python/scripts/batch_check_laz_holes.py
+# cell_m=250, subsample=20, border=1; area em m2 das celulas vazias interiores.
+# ---------------------------------------------------------------------------
+
+hole_components_cell_counts <- function(mask) {
+  nr <- nrow(mask)
+  nc <- ncol(mask)
+  if (!nr || !nc) return(integer(0))
+  seen <- matrix(FALSE, nr, nc)
+  counts <- integer(0)
+  for (r in seq_len(nr)) {
+    for (c in seq_len(nc)) {
+      if (!isTRUE(mask[r, c]) || seen[r, c]) next
+      stack_r <- r
+      stack_c <- c
+      seen[r, c] <- TRUE
+      ncell <- 0L
+      while (length(stack_r)) {
+        i <- length(stack_r)
+        cr <- stack_r[[i]]
+        cc <- stack_c[[i]]
+        stack_r <- stack_r[-i]
+        stack_c <- stack_c[-i]
+        ncell <- ncell + 1L
+        nbr <- list(
+          c(cr - 1L, cc), c(cr + 1L, cc), c(cr, cc - 1L), c(cr, cc + 1L)
+        )
+        for (p in nbr) {
+          nr2 <- p[[1]]
+          nc2 <- p[[2]]
+          if (nr2 < 1L || nr2 > nr || nc2 < 1L || nc2 > nc) next
+          if (!isTRUE(mask[nr2, nc2]) || seen[nr2, nc2]) next
+          seen[nr2, nc2] <- TRUE
+          stack_r <- c(stack_r, nr2)
+          stack_c <- c(stack_c, nc2)
+        }
+      }
+      counts <- c(counts, ncell)
+    }
+  }
+  counts
+}
+
+# Retorna list(largest_hole_ha, n_holes, empty_frac, erro, elapsed_s).
+laz_hole_check_superfast <- function(
+    laz_path,
+    cell_m = 250,
+    subsample = 20L,
+    border_cells = 1L,
+    min_hole_m2 = 10000
+) {
+  t0 <- proc.time()[["elapsed"]]
+  out <- list(
+    largest_hole_ha = 0,
+    n_holes = 0L,
+    empty_frac = 0,
+    erro = "",
+    elapsed_s = 0
+  )
+  finish <- function() {
+    out$elapsed_s <- proc.time()[["elapsed"]] - t0
+    out
+  }
+  if (!nzchar(laz_path) || !file.exists(laz_path)) {
+    out$erro <- "LAZ ausente"
+    return(finish())
+  }
+  subsample <- max(1L, as.integer(subsample))
+  las <- tryCatch(
+    lidR::readLAS(
+      laz_path,
+      select = "xy",
+      filter = paste("-keep_every_nth", subsample)
+    ),
+    error = function(e) e
+  )
+  if (inherits(las, "error")) {
+    out$erro <- clip_err(conditionMessage(las), 200)
+    return(finish())
+  }
+  if (is.null(las) || lidR::is.empty(las) || nrow(las@data) < 1L) {
+    out$erro <- "LAZ sem pontos (apos subsample)"
+    return(finish())
+  }
+  x <- las@data$X
+  y <- las@data$Y
+  pad <- cell_m * 0.5
+  xmin <- min(x, na.rm = TRUE) - pad
+  xmax <- max(x, na.rm = TRUE) + pad
+  ymin <- min(y, na.rm = TRUE) - pad
+  ymax <- max(y, na.rm = TRUE) + pad
+  width <- max(xmax - xmin, cell_m)
+  height <- max(ymax - ymin, cell_m)
+  ncols <- max(1L, as.integer(ceiling(width / cell_m)))
+  nrows <- max(1L, as.integer(ceiling(height / cell_m)))
+  if (as.numeric(ncols) * as.numeric(nrows) > 5e6) {
+    out$erro <- sprintf("grade grande demais (%dx%d)", ncols, nrows)
+    return(finish())
+  }
+  occ <- matrix(FALSE, nrows, ncols)
+  cols <- as.integer(floor((x - xmin) / cell_m)) + 1L
+  rows <- as.integer(floor((ymax - y) / cell_m)) + 1L
+  ok <- cols >= 1L & cols <= ncols & rows >= 1L & rows <= nrows &
+    is.finite(cols) & is.finite(rows)
+  if (any(ok)) {
+    occ[cbind(rows[ok], cols[ok])] <- TRUE
+  }
+  b <- max(0L, as.integer(border_cells))
+  if (b > 0L && nrows > 2L * b && ncols > 2L * b) {
+    interior <- matrix(TRUE, nrows, ncols)
+    interior[seq_len(b), ] <- FALSE
+    interior[(nrows - b + 1L):nrows, ] <- FALSE
+    interior[, seq_len(b)] <- FALSE
+    interior[, (ncols - b + 1L):ncols] <- FALSE
+  } else {
+    return(finish())
+  }
+  empty_int <- interior & !occ
+  n_int <- sum(interior)
+  n_empty <- sum(empty_int)
+  out$empty_frac <- if (n_int > 0) n_empty / n_int else 0
+  cell_area <- as.numeric(cell_m) * as.numeric(cell_m)
+  counts <- hole_components_cell_counts(empty_int)
+  areas <- counts * cell_area
+  areas <- areas[areas >= as.numeric(min_hole_m2)]
+  out$n_holes <- length(areas)
+  if (length(areas)) {
+    out$largest_hole_ha <- max(areas) / 10000
+  }
+  finish()
+}
+
+# Marca processar -> buraco_grande quando maior buraco interior >= skip_holes (ha).
+apply_skip_holes_plan <- function(plan, opt, say_fn = message) {
+  thr <- opt$skip_holes
+  if (is.null(plan) || !nrow(plan)) return(plan)
+  if (is.null(thr) || length(thr) < 1L || is.na(thr) || !is.finite(thr) || thr <= 0) {
+    say_fn("SKIP_HOLES: desligado (nao filtra buracos).")
+    return(plan)
+  }
+  go <- which(plan$acao == "processar")
+  if (!length(go)) {
+    say_fn("SKIP_HOLES: limiar ", thr, " ha (nada na fila para checar).")
+    return(plan)
+  }
+  say_fn(
+    "SKIP_HOLES: limiar ", thr, " ha | superfast (cell=250m, 1/", 20,
+    " pts, border=1) em ", length(go), " tile(s)..."
+  )
+  min_m2 <- as.numeric(thr) * 10000
+  n_skip <- 0L
+  for (k in seq_along(go)) {
+    i <- go[[k]]
+    lp <- as.character(plan$laz_path[[i]] %||% "")
+    tid <- as.character(plan$tile_id[[i]] %||% "")
+    chk <- laz_hole_check_superfast(
+      lp,
+      cell_m = 250,
+      subsample = 20L,
+      border_cells = 1L,
+      min_hole_m2 = min_m2
+    )
+    if (nzchar(chk$erro)) {
+      say_fn(
+        "  [", k, "/", length(go), "] ", tid,
+        ": checagem falhou (", chk$erro, "); segue na fila."
+      )
+      next
+    }
+    if (isTRUE(chk$largest_hole_ha >= thr)) {
+      plan[i, `:=`(
+        acao = "buraco_grande",
+        motivo = sprintf(
+          "buraco interior %.1f ha >= SKIP_HOLES %.0f ha (superfast)",
+          chk$largest_hole_ha, thr
+        )
+      )]
+      n_skip <- n_skip + 1L
+      say_fn(
+        "  [", k, "/", length(go), "] PULA ", tid,
+        sprintf(": buraco %.1f ha (%.1fs)", chk$largest_hole_ha, chk$elapsed_s)
+      )
+    } else if (k == 1L || k == length(go) || (k %% 25L) == 0L) {
+      say_fn(
+        "  [", k, "/", length(go), "] ok ", tid,
+        sprintf(" (maior=%.2f ha, %.1fs)", chk$largest_hole_ha, chk$elapsed_s)
+      )
+    }
+  }
+  say_fn("SKIP_HOLES: ", n_skip, " tile(s) pulados (buraco >= ", thr, " ha).")
+  plan
+}
 
 resolve_laz_path <- function(tile_id, laz_dir, hint = "") {
   hint <- as.character(hint %||% "")
@@ -2854,12 +3101,21 @@ main <- function() {
   if (opt$list_blocos) opt$dry_run <- TRUE
 
   base_pkgs <- c("data.table", "DBI", "RSQLite")
+  holes_on <- !is.null(opt$skip_holes) && length(opt$skip_holes) &&
+    !is.na(opt$skip_holes) && is.finite(opt$skip_holes) && opt$skip_holes > 0
   if (!opt$dry_run && !opt$report_only) {
     need_pkgs(c(base_pkgs, HELPER_PKGS), "pipeline GeoTrees")
   } else if (opt$report_only) {
     need_pkgs(c(base_pkgs, "sf"), "relatorio e GPKG")
   } else {
-    need_pkgs(base_pkgs, "plano, sem processar")
+    # dry-run: lidR so se SKIP_HOLES ativo (checagem superfast no plano)
+    need_pkgs(
+      if (holes_on) c(base_pkgs, "lidR") else base_pkgs,
+      if (holes_on) "plano + SKIP_HOLES" else "plano, sem processar"
+    )
+  }
+  if (holes_on && !requireNamespace("lidR", quietly = TRUE)) {
+    stop("SKIP_HOLES exige o pacote lidR.", call. = FALSE)
   }
   suppressPackageStartupMessages(library(data.table))
   options(warn = 1, sf_use_s2 = FALSE)
@@ -3051,6 +3307,9 @@ main <- function() {
 
   if (opt$dry_run) {
     modo <- if (opt$list_blocos) "lista" else "dry"
+    if (!is.null(plan) && nrow(plan)) {
+      plan <- apply_skip_holes_plan(plan, opt, say_fn = say)
+    }
     say("Gravando o plano, sem processar tile...")
     dest <- write_md(modo)
     if (!is.null(plan) && any(plan$acao == "processar")) {
@@ -3084,6 +3343,9 @@ main <- function() {
   als_pre <- als_cfg(opt, pipeline = "lastools")
   if (isTRUE(opt$delete_laz_on_ok) && isTRUE(als_pre$enabled)) {
     plan <- laz_catchup_api(opt, als_pre, plan, say_fn = say)
+  }
+  if (!is.null(plan) && nrow(plan)) {
+    plan <- apply_skip_holes_plan(plan, opt, say_fn = say)
   }
 
   fila <- if (is.null(plan)) plan else plan[acao == "processar"]

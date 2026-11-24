@@ -69,6 +69,11 @@ set "DELETE_LAZ_ON_OK=true"
 REM true  = SP + fora; processa sp_inside=TRUE primeiro, depois FALSE
 REM false = so tiles com sp_inside=TRUE (dentro de SP)
 set "OUT_SP=true"
+REM SKIP_HOLES: pula tile se buraco interior (cobertura) >= N hectares.
+REM   20 = padrao (pula buracos >= 20 ha). 6 = >= 6 ha. 15 = >= 15 ha.
+REM   vazio = nao checa / nao pula buracos (--no-skip-holes).
+REM Checagem superfast (grade 250 m), como batch_check_laz_holes.py --superfast.
+set "SKIP_HOLES=20"
 REM =====================================================================
 
 echo ============================================================
@@ -96,6 +101,11 @@ echo  NAS     : %NAS_DIR%
 echo  NAS del : %NAS_DELETE_LOCAL%  ^(apagar OUTDIR apos copia^)
 echo  Del LAZ : %DELETE_LAZ_ON_OK%  ^(apagar .laz quando status 1^)
 echo  OUT_SP  : %OUT_SP%  ^(true=SP primeiro depois fora; false=so SP^)
+if "!SKIP_HOLES!"=="" (
+  echo  Holes   : desligado ^(SKIP_HOLES vazio^)
+) else (
+  echo  Holes   : pula se buraco ^>= !SKIP_HOLES! ha ^(superfast^)
+)
 echo  Produtos: %OUT_DIR%\processed\22^|23\^<tile^>
 echo ============================================================
 echo.
@@ -174,13 +184,15 @@ if /I "%OUT_SP%"=="false" set "OUT_SP_ARG=--no-out-sp"
 if /I "%OUT_SP%"=="0" set "OUT_SP_ARG=--no-out-sp"
 if /I "%OUT_SP%"=="no" set "OUT_SP_ARG=--no-out-sp"
 if /I "%OUT_SP%"=="nao" set "OUT_SP_ARG=--no-out-sp"
+set "SKIP_HOLES_ARG=--no-skip-holes"
+if defined SKIP_HOLES if not "%SKIP_HOLES%"=="" set "SKIP_HOLES_ARG=--skip-holes %SKIP_HOLES%"
 
 REM Token so no ambiente deste .bat (set acima). Nao passa --als-api-token.
 echo Comando:
-echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %*
+echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %SKIP_HOLES_ARG% %*
 echo.
 
-"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %SKIP_HOLES_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.

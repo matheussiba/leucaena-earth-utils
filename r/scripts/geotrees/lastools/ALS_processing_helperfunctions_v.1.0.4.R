@@ -1675,6 +1675,32 @@ lassplit = function(params_general, path_output = "", update.path = TRUE){
 }
 
 
+# Safe Date -> "dd/mm/yyyy". Non-Date values must not reach format.default with a
+# strptime pattern (that pattern is misread as trim -> "invalid 'trim' argument").
+format_date_dmy = function(x) {
+  if (is.null(x) || length(x) < 1L) return(NA_character_)
+  x1 <- x[[1]]
+  d <- tryCatch({
+    if (inherits(x1, "Date")) {
+      x1
+    } else if (inherits(x1, c("POSIXct", "POSIXt"))) {
+      as.Date(x1)
+    } else {
+      s <- as.character(x1)
+      if (length(s) < 1L || is.na(s) || !nzchar(s)) {
+        as.Date(NA)
+      } else {
+        out <- as.Date(s, format = "%d/%m/%Y")
+        if (is.na(out)) out <- as.Date(s, format = "%Y-%m-%d")
+        if (is.na(out)) out <- as.Date(s, format = "%Y/%m/%d")
+        out
+      }
+    }
+  }, error = function(e) as.Date(NA))
+  if (length(d) < 1L || is.na(d[[1]])) return(NA_character_)
+  as.character(format(as.Date(d[[1]]), "%d/%m/%Y"))
+}
+
 # retile point cloud for efficient parallel processing
 # since v.44: slightly slicker, no dropping of points at that stage anymore, and "extra_pass", in case it can help with memory issues
 # class_rm/exclass_rm vazios nao podem ir para paste0(..., class_rm): vira character(0)
@@ -5760,8 +5786,10 @@ process.datasubset = function(path_lastools, path_tmp, path_input, path_output_p
           outline_localCRS$GPSadjstd = summary_full$encoding_global
           outline_localCRS$mingps = round(summary_full$mingps,3)
           outline_localCRS$maxgps = round(summary_full$maxgps,3)
-          outline_localCRS$mindt = as.character(format(dates_acquisition$mindt,"%d/%m/%Y"))
-          outline_localCRS$maxdt = as.character(format(dates_acquisition$maxdt,"%d/%m/%Y"))
+          # Coerce to Date first: format(non-Date, "%d/%m/%Y") hits format.default
+          # and treats the pattern as trim -> "invalid 'trim' argument".
+          outline_localCRS$mindt = format_date_dmy(dates_acquisition$mindt)
+          outline_localCRS$maxdt = format_date_dmy(dates_acquisition$maxdt)
           # outline_localCRS$pd_point = round(summary_full$density_points_mean,3)
           # outline_localCRS$pd_pulse = round(summary_full$density_pulses_mean,3)
           # outline_localCRS$sdpd_pulse = round(summary_full$density_pulses_sd,3)
@@ -6044,17 +6072,23 @@ process.dataset = function(name_job, type_file, dir_dataset, dir_processed, tmpd
         )
 
         # NULL via `$<-` no data.table vira "Supplied 9 columns to be assigned 8 items"
+        # Format outside data.table j: inside j, time_start/time_end/status resolve to
+        # the (character) columns, so format(..., "%d/...") becomes invalid 'trim'.
         if (is.null(status)) status = "error"
-        information_processing[i, status := as.character(status)]
+        txt_status = as.character(status)
+        information_processing[i, status := txt_status]
       } 
 
       time_end = Sys.time()
       time_processing = difftime(time_end,time_start,units = "mins")
 
       # append to the general output files
-      information_processing[i, time_start := as.character(format(time_start,"%d/%m/%Y %Hh%M"))]
-      information_processing[i, time_end := as.character(format(time_end,"%d/%m/%Y %Hh%M"))]
-      information_processing[i, time_processing_minutes := as.character(round(as.numeric(time_processing)))]
+      txt_start = as.character(format(time_start,"%d/%m/%Y %Hh%M"))
+      txt_end = as.character(format(time_end,"%d/%m/%Y %Hh%M"))
+      txt_minutes = as.character(round(as.numeric(time_processing)))
+      information_processing[i, time_start := txt_start]
+      information_processing[i, time_end := txt_end]
+      information_processing[i, time_processing_minutes := txt_minutes]
 
       # v.1.0.0 remove default printing of job summary. Since jobs can be run at different levels, this might be confusing. Summary information is included for each geo-unit anyways
       if(print.summary_job == T){
