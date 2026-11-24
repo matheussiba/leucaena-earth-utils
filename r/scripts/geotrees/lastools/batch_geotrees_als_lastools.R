@@ -711,17 +711,30 @@ read_artic_table <- function(path, layer) {
       call. = FALSE
     )
   }
+  cols <- DBI::dbListFields(con, layer)
+  want <- c("NOMENC_2K", "NOMENC_5K", "NOMENC_10K", "BLOCO", "layer", "periodvoo", "epsg", "sp_inside")
+  have <- want[want %in% cols]
   sql <- sprintf(
-    paste0(
-      'SELECT "NOMENC_2K", "NOMENC_5K", "NOMENC_10K", "BLOCO", "layer", ',
-      '"periodvoo", "epsg" FROM "%s"'
-    ),
+    'SELECT %s FROM "%s"',
+    paste(sprintf('"%s"', have), collapse = ", "),
     layer
   )
   say_debug("Consultando a tabela da articulacao (SQLite, somente leitura)...")
   tab <- DBI::dbGetQuery(con, sql)
   say_debug("Tabela lida: ", nrow(tab), " linha(s).")
   tab
+}
+
+# sp_inside na articulacao: 1/TRUE = dentro de SP; 0/FALSE = fora.
+parse_sp_inside <- function(x) {
+  if (is.null(x)) return(logical())
+  if (is.logical(x)) return(!is.na(x) & x)
+  if (is.numeric(x)) return(!is.na(x) & as.numeric(x) != 0)
+  xc <- tolower(trimws(as.character(x)))
+  out <- rep(NA, length(xc))
+  out[xc %in% c("1", "true", "t", "yes", "y", "sim")] <- TRUE
+  out[xc %in% c("0", "false", "f", "no", "n", "nao")] <- FALSE
+  out
 }
 
 build_index <- function(raw) {
@@ -733,24 +746,29 @@ build_index <- function(raw) {
   if (!"epsg" %in% names(raw)) raw[, epsg := NA_integer_]
   raw[, epsg := suppressWarnings(as.integer(epsg))]
   raw[, epsg_proc := map_epsg_proc(epsg)]
+  if (!"sp_inside" %in% names(raw)) {
+    raw[, sp_inside := NA]
+  } else {
+    raw[, sp_inside := parse_sp_inside(sp_inside)]
+  }
   pieces <- data.table::rbindlist(list(
     raw[nzchar(NOMENC_2K), .(
       tile_id = toupper(NOMENC_2K), via = "NOMENC_2K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
       nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
-      epsg_artic = epsg, epsg_proc = epsg_proc
+      epsg_artic = epsg, epsg_proc = epsg_proc, sp_inside = sp_inside
     )],
     raw[nzchar(NOMENC_5K), .(
       tile_id = toupper(NOMENC_5K), via = "NOMENC_5K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
       nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
-      epsg_artic = epsg, epsg_proc = epsg_proc
+      epsg_artic = epsg, epsg_proc = epsg_proc, sp_inside = sp_inside
     )],
     raw[nzchar(NOMENC_10K), .(
       tile_id = toupper(NOMENC_10K), via = "NOMENC_10K",
       bloco = BLOCO, layer_artic = layer, periodvoo = periodvoo,
       nomenc_2k = NOMENC_2K, nomenc_5k = NOMENC_5K, nomenc_10k = NOMENC_10K,
-      epsg_artic = epsg, epsg_proc = epsg_proc
+      epsg_artic = epsg, epsg_proc = epsg_proc, sp_inside = sp_inside
     )]
   ), use.names = TRUE)
   if (!nrow(pieces)) {
@@ -758,7 +776,7 @@ build_index <- function(raw) {
       tile_id = character(), via = character(), bloco = character(),
       layer_artic = character(), periodvoo = character(),
       nomenc_2k = character(), nomenc_5k = character(), nomenc_10k = character(),
-      epsg_artic = integer(), epsg_proc = integer()
+      epsg_artic = integer(), epsg_proc = integer(), sp_inside = logical()
     ))
   }
   pieces[!duplicated(tile_id)]
@@ -1274,7 +1292,7 @@ load_artic_index <- function(path, meta_path, artic_path) {
   idx[, ..precisa]
 }
 
-make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L) {
+make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L, out_sp = FALSE) {
   if (is.null(files_dt)) {
     files_dt <- data.table::data.table(
       laz_path = character(), laz_nome = character(),
@@ -1290,7 +1308,8 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
     plan[, `:=`(
       via = "", bloco = "", layer_artic = "", periodvoo = "",
       nomenc_2k = "", nomenc_5k = "", nomenc_10k = "",
-      epsg_artic = NA_integer_, epsg_proc = NA_integer_
+      epsg_artic = NA_integer_, epsg_proc = NA_integer_,
+      sp_inside = NA
     )]
   }
   for (col in c("bloco", "layer_artic", "periodvoo", "nomenc_2k", "nomenc_5k", "nomenc_10k", "via")) {
@@ -1299,8 +1318,10 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
   }
   if (!"epsg_artic" %in% names(plan)) plan[, epsg_artic := NA_integer_]
   if (!"epsg_proc" %in% names(plan)) plan[, epsg_proc := NA_integer_]
+  if (!"sp_inside" %in% names(plan)) plan[, sp_inside := NA]
   plan[, epsg_artic := suppressWarnings(as.integer(epsg_artic))]
   plan[, epsg_proc := suppressWarnings(as.integer(epsg_proc))]
+  plan[, sp_inside := parse_sp_inside(sp_inside)]
   plan[is.na(epsg_proc) & !is.na(epsg_artic), epsg_proc := map_epsg_proc(epsg_artic)]
   if (length(blocos)) {
     plan[, no_filtro := toupper(bloco) %in% blocos]
@@ -1311,6 +1332,13 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
     !no_filtro, "fora_do_bloco",
     data.table::fifelse(tile_id %in% done_ids & !force, "pular", "processar")
   )]
+  # OUT_SP=false: so sp_inside=TRUE (dentro de SP). OUT_SP=true: SP + fora.
+  if (!isTRUE(out_sp)) {
+    plan[
+      acao == "processar" & (is.na(sp_inside) | sp_inside == FALSE),
+      acao := "fora_de_sp"
+    ]
+  }
   # Sem CRS mapeavel nao processa: o pipeline LAStools quebra na reprojection check.
   plan[
     acao == "processar" & (is.na(epsg_proc) | epsg_proc <= 0L),
@@ -1327,6 +1355,7 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
   plan[, motivo := ""]
   plan[acao == "pular", motivo := "ja processado nesta maquina"]
   plan[acao == "fora_do_bloco", motivo := "fora do filtro de BLOCO"]
+  plan[acao == "fora_de_sp", motivo := "fora de SP (sp_inside=FALSE; use --out-sp)"]
   plan[acao == "adiado_limit", motivo := "alem do --limit desta rodada"]
   plan[acao == "sem_crs", motivo := "sem epsg na articulacao (31982/31983)"]
   plan[acao == "processar" & !nzchar(layer_artic), motivo := "sem ficha na articulacao"]
@@ -1340,6 +1369,10 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L)
   say(
     "Plano pronto. Unicos: ", nrow(plan),
     " | duplicados deixados de lado: ", n_dup, "."
+  )
+  say(
+    "Filtro SP: ",
+    if (isTRUE(out_sp)) "OUT_SP=true (dentro + fora de SP)" else "OUT_SP=false (so sp_inside=TRUE)"
   )
   if (nrow(grupos)) {
     say(
@@ -2852,7 +2885,8 @@ main <- function() {
       }
       plan <- make_plan(
         inv$dt, idx, blocos, done_ids,
-        if (opt$report_only) 0L else opt$limit, opt$force, inv$n_dup
+        if (opt$report_only) 0L else opt$limit, opt$force, inv$n_dup,
+        out_sp = isTRUE(opt$out_sp)
       )
       n_dup <- attr(plan, "n_dup")
       if (is.null(n_dup)) n_dup <- 0L
@@ -2874,12 +2908,17 @@ main <- function() {
   cat("Maquina: ", maquina(), "\n", sep = "")
   cat("LAZ:     ", opt$laz_dir, "\n", sep = "")
   cat("BLOCO:   ", if (length(blocos)) paste(blocos, collapse = ", ") else "(todos na pasta)", "\n", sep = "")
+  cat(
+    "OUT_SP:  ", if (isTRUE(opt$out_sp)) "true (SP + fora)" else "false (so sp_inside=TRUE)",
+    "\n", sep = ""
+  )
   cat("Saida:   ", paths$root, "\n", sep = "")
   if (!is.null(plan)) {
     cat("Arquivos:", nrow(plan), "\n")
     cat("  processar:    ", sum(plan$acao == "processar"), "\n", sep = "")
     cat("  pular:        ", sum(plan$acao == "pular"), "\n", sep = "")
     cat("  fora do bloco:", sum(plan$acao == "fora_do_bloco"), "\n", sep = "")
+    cat("  fora de SP:   ", sum(plan$acao == "fora_de_sp"), "\n", sep = "")
     cat("  sem CRS:      ", sum(plan$acao == "sem_crs"), "\n", sep = "")
     cat("  alem do limit:", sum(plan$acao == "adiado_limit"), "\n", sep = "")
     go <- plan[acao == "processar"]
