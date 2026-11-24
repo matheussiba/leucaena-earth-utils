@@ -99,7 +99,16 @@ Rscript sync_lidar_proc_gpkg.R --dry-run
 Rscript sync_lidar_proc_gpkg.R
 ```
 
-(Python equivalent: `python/scripts/sync_lidar_proc_from_api.py`.)
+When products already sit on the NAS (`O:\ALS_IGC\Fehidro|Lote04|Voo22`), treat the
+GPKG as source of truth and push online afterward:
+
+```bat
+set ALS_MACHINE_TOKEN=...
+Rscript sync_lidar_proc_from_nas.R --dry-run
+Rscript sync_lidar_proc_from_nas.R
+```
+
+(Python mirror-from-API only: `python/scripts/sync_lidar_proc_from_api.py`.)
 
 ## LAStools variant
 
