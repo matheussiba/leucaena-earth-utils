@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.5.3-lastools"
+VERSION <- "1.5.4-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -1803,9 +1803,12 @@ issue_text <- function(logfile) {
   )
   if (is.null(dt) || !nrow(dt)) return("")
   col <- if ("issue" %in% names(dt)) "issue" else names(dt)[ncol(dt)]
-  txt <- paste(unique(as.character(dt[[col]])), collapse = " | ")
+  vals <- as.character(dt[[col]])
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  if (!length(vals)) return("")
+  txt <- paste(unique(vals), collapse = " | ")
   txt <- gsub("[\r\n\t]+", " ", txt)
-  txt <- trimws(txt)
+  txt <- trimws(as.character(txt))
   if (!nzchar(txt)) return("")
   clip_err(txt, 1200)
 }
@@ -2924,7 +2927,18 @@ main <- function() {
   parou <- FALSE
   n_erro_run <- 0L
   n_pulados <- if (is.null(plan)) 0L else sum(plan$acao == "pular")
-  cat("Retomada: ", n_pulados, " tile(s) ja prontos nesta saida e nao serao refeitos.\n", sep = "")
+  n_done_disk <- if (exists("done", inherits = FALSE) && is.data.frame(done)) nrow(done) else 0L
+  cat(
+    "Retomada: ", n_pulados, " tile(s) da fila pulados (LAZ ainda na pasta e ja em processed/).\n",
+    sep = ""
+  )
+  if (n_done_disk > n_pulados) {
+    cat(
+      "  Em processed/ ha ", n_done_disk,
+      " tile(s) OK; os que nao entram em 'pular' geralmente ja nao tem .laz (DELETE_LAZ_ON_OK).\n",
+      sep = ""
+    )
+  }
   cat("Na fila agora: ", n_fila, ".\n", sep = "")
   cat("Se o script parou no meio de um .laz, esse arquivo comeca de novo. Os que ja terminaram ficam pulados.\n")
   cat("Ordem: um grupo EPSG por vez (32722 depois 32723, conforme a articulacao).\n")

@@ -1082,9 +1082,7 @@ las2las.initial = function(params_general, path_output = "", force.utm = F, remo
         "-i",
         file.path.system(type_os = params_general$type_os, params_general$path_data,paste0("*.",params_general$type_file)),
         "-cores", params_general$n_cores,
-        "-drop_withheld",
-        paste0("-drop_class 7 18 ", class_rm), # noise classes (noise / high noise) # new in v.47: remove extra noise classes or otherwise from scan (necessary for IGN France, for example, where artefacts/noise is usually marked with 65, or even 28)
-        ifelse(nchar(exclass_rm) > 0, paste0("-drop_extended_class ", exclass_rm),""), # new in v.47: remove extra noise classes or otherwise from scan (necessary for IGN France, for example, where artefacts/noise is usually marked with 65, or even 28)
+        format_drop_class_args(class_rm, exclass_rm),
         "-crop_to_bounding_box", # remove xy outliers
         ifelse(remove.vlr == T,"-remove_all_vlrs",""),
         ifelse(remove.evlr == T,"-remove_all_evlrs",""),
@@ -1679,6 +1677,20 @@ lassplit = function(params_general, path_output = "", update.path = TRUE){
 
 # retile point cloud for efficient parallel processing
 # since v.44: slightly slicker, no dropping of points at that stage anymore, and "extra_pass", in case it can help with memory issues
+# class_rm/exclass_rm vazios nao podem ir para paste0(..., class_rm): vira character(0)
+# e derruba o comando inteiro do system()/lastile ("invalid argument type" / trim).
+format_drop_class_args = function(class_rm = c(), exclass_rm = c()) {
+  bits <- c("-drop_withheld", "-drop_class 7 18")
+  cr <- as.character(class_rm)
+  cr <- cr[!is.na(cr) & nzchar(cr)]
+  if (length(cr)) bits <- c(bits, cr)
+  out <- paste(bits, collapse = " ")
+  ex <- as.character(exclass_rm)
+  ex <- ex[!is.na(ex) & nzchar(ex)]
+  if (length(ex)) out <- paste(out, "-drop_extended_class", paste(ex, collapse = " "))
+  out
+}
+
 lastile = function(params_general, path_output = "", size_tile = 500, update.path = TRUE, refine = NULL, size_MB_input = 0, arguments_additional = ""){
 
   # define output directory
@@ -1686,6 +1698,11 @@ lastile = function(params_general, path_output = "", size_tile = 500, update.pat
     path_output = file.path(params_general$path_data,"lastile")
   }
   if(!dir.exists(path_output)) dir.create(path_output,showWarnings = FALSE)
+  if (length(arguments_additional) < 1L || (length(arguments_additional) == 1L && is.na(arguments_additional[[1]]))) {
+    arguments_additional <- ""
+  } else {
+    arguments_additional <- paste(as.character(arguments_additional), collapse = " ")
+  }
 
   # pass lastools command to system
   if(!is.voidstring(params_general$path_lastools)){
@@ -4848,6 +4865,9 @@ process.datasubset = function(path_lastools, path_tmp, path_input, path_output_p
             if(grepl(pattern = paste0(".",type_file),x = path_input, fixed = TRUE) & file_test("-f",path_input)){ # file test may be overkill here
               path_origin = dirname(path_input)
             }
+            # Passar o .laz (path_input), nao path_origin=dirname: add.adjacent faz
+            # list.files(dirname(...)). Com o arquivo, busca so na pasta do tile
+            # (_inbox). Com o diretorio, subia para OUT_DIR e vasculhava tudo.
             files_adjacent = add.adjacent(outlines_cluster = outlines_cluster, path_origin = path_input, path_moveto = params_general$path_data, type_file = params_general$type_file, buffer = params_general$buffer)
             cat("\nFound",length(files_adjacent),"adjacent files\n")
     
@@ -4860,14 +4880,14 @@ process.datasubset = function(path_lastools, path_tmp, path_input, path_output_p
             }
             
             cat("\nRetiling\n")
-            params_general = lastile(params_general = params_general,size_tile = size_tile,refine = refine, size_MB_input = size_MB_input,arguments_additional = paste0("-drop_withheld", paste0(" -drop_class 7 18 ", class_rm), ifelse(nchar(exclass_rm) > 0, paste0(" -drop_extended_class ", exclass_rm),""))) # new in v.47: remove extra noise classes or otherwise from scan (necessary for IGN France, for example, where artefacts/noise is usually marked with 65, or even 28)
+            params_general = lastile(params_general = params_general,size_tile = size_tile,refine = refine, size_MB_input = size_MB_input,arguments_additional = format_drop_class_args(class_rm, exclass_rm))
             
             cat("\nRemove superfluous tiles\n")
             files_removed = remove.adjacent(path_tiles = params_general$path_data, outlines_cluster = outlines_cluster, type_file = params_general$type_file, size_tile = size_tile)
             cat("\nRemoved",length(files_removed),"tiles\n")
             
-            arguments_additional = paste0(ifelse(!is.null(angle_lim),paste0("-drop_abs_scan_angle_above ", angle_lim," "),""), ifelse(force.utm_auto == T,"-target_utm auto ",""),ifelse(!is.null(factor_rescale),paste0(" -rescale ",factor_rescale," ",factor_rescale," ",factor_rescale," "),""))
-            if(arguments_additional != ""){
+            arguments_additional = paste0(ifelse(!is.null(angle_lim),paste0("-drop_abs_scan_angle_above ", angle_lim," "),""), ifelse(isTRUE(force.utm_auto),"-target_utm auto ",""),ifelse(!is.null(factor_rescale),paste0(" -rescale ",factor_rescale," ",factor_rescale," ",factor_rescale," "),""))
+            if(length(arguments_additional) == 1L && nzchar(arguments_additional)){
               cat("\nAdditional cleanup\n")
               # usually performed beforehand
               params_general = call.lastools(command_lastools = "las2las",arguments_lastools = arguments_additional,params_general = params_general,update.path = T)
