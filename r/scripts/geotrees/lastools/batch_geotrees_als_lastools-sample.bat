@@ -51,10 +51,6 @@ REM true = verbose do pipeline (retilagem tile a tile etc.)
 REM false = so andamento principal + barra de progresso (recomendado)
 set "DEBUG=false"
 
-REM false = so tiles com sp_inside=1 (dentro de SP) na articulacao IGC
-REM true  = processa tambem tiles fora de SP (sp_inside=0)
-set "OUT_SP=false"
-
 REM >>> COLE O TOKEN DO RENDER AQUI (entre as aspas). Vazio = API desligada.
 REM Uma unica linha. Nao deixe outro set ALS_MACHINE_TOKEN= vazio abaixo.
 set "ALS_MACHINE_TOKEN="
@@ -93,7 +89,6 @@ if "!ALS_MACHINE_TOKEN!"=="" (
 )
 echo  Report  : a cada %ALS_REPORT_EVERY% tile(s)
 echo  Debug   : %DEBUG%
-echo  OUT_SP  : %OUT_SP%  ^(false=so SP / true=SP+fora^)
 echo  NAS     : %NAS_DIR%
 echo  NAS del : %NAS_DELETE_LOCAL%  ^(apagar OUTDIR apos copia^)
 echo  Del LAZ : %DELETE_LAZ_ON_OK%  ^(apagar .laz quando status 1^)
@@ -170,18 +165,13 @@ if /I "%DELETE_LAZ_ON_OK%"=="false" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="0" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="no" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="nao" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
-set "OUT_SP_ARG=--no-out-sp"
-if /I "%OUT_SP%"=="true" set "OUT_SP_ARG=--out-sp true"
-if /I "%OUT_SP%"=="1" set "OUT_SP_ARG=--out-sp true"
-if /I "%OUT_SP%"=="yes" set "OUT_SP_ARG=--out-sp true"
-if /I "%OUT_SP%"=="sim" set "OUT_SP_ARG=--out-sp true"
 
 REM Token so no ambiente deste .bat (set acima). Nao passa --als-api-token.
 echo Comando:
-echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %*
+echo "%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %*
 echo.
 
-"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %OUT_SP_ARG% %*
+"%RS%" "%~dp0batch_geotrees_als_lastools.R" --laz-dir "%LAZ_DIR%" --out-dir "%OUT_DIR%" %BLOCO_ARG% %ARTIC_ARG% %CORES_ARG% %LIMIT_ARG% %LASTOOLS_ARG% %HOURS_ARG% %ALS_URL_ARG% %ALS_REP_ARG% %DEBUG_ARG% %NAS_ARG% %NAS_DEL_ARG% %DEL_LAZ_ARG% %*
 set "RC=%ERRORLEVEL%"
 
 echo.

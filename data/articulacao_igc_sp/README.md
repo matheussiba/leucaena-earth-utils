@@ -9,13 +9,7 @@ laser articulation grids into one layer:
 
 Extra fields: `layer` (source articulation), `NOMENC_10K`, `path`, `overlap`,
 `msb_use`, **`epsg`** (31982 or 31983 for each tile — used to assign the correct
-projected CRS when a source TIFF is tagged with another EPSG, e.g. 32723),
-**`lidar_proc`** / **`rgbnir_proc`** (0–4 processing status; mirror of
-leucaena.earth ALS registry — update with
-`python/scripts/sync_lidar_proc_from_api.py`),
-**`sp_inside`** (`1` = inside São Paulo state, `0` = outside).
-GeoTrees bats use `OUT_SP=false` to process only `sp_inside=1`, or
-`OUT_SP=true` to include outside-SP tiles as well.
+projected CRS when a source TIFF is tagged with another EPSG, e.g. 32723).
 CRS of the layer geometry: **SIRGAS 2000** (EPSG:4674).
 
 Used as the default `--articulacao` input for
