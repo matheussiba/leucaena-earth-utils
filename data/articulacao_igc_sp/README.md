@@ -9,7 +9,10 @@ laser articulation grids into one layer:
 
 Extra fields: `layer` (source articulation), `NOMENC_10K`, `path`, `overlap`,
 `msb_use`, **`epsg`** (31982 or 31983 for each tile — used to assign the correct
-projected CRS when a source TIFF is tagged with another EPSG, e.g. 32723).
+projected CRS when a source TIFF is tagged with another EPSG, e.g. 32723),
+**`lidar_proc`** / **`rgbnir_proc`** (0–4; mirror from leucaena.earth via
+`python/scripts/sync_lidar_proc_from_api.py`), **`sp_inside`** (`1` inside SP,
+`0` outside).
 CRS of the layer geometry: **SIRGAS 2000** (EPSG:4674).
 
 Used as the default `--articulacao` input for
