@@ -18,7 +18,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.3.10-lastools"
+VERSION <- "1.4.0-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -342,7 +342,8 @@ help_text <- function() {
     "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
     "Parar: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
-    "NAS: <nas>/<Fehidro|Lote04|Voo22>/<BLOCO>/<tile> (layer da articulacao)."
+    "NAS: <nas>/<Fehidro|Lote04|Voo22>/<BLOCO>/<tile> (layer da articulacao);",
+    "     copia em background; fila geotrees_als_nas_queue.csv."
   )
 }
 
@@ -551,7 +552,9 @@ out_paths <- function(out_dir) {
     artic_index = file.path(out_dir, "geotrees_als_artic_indice.csv"),
     artic_index_meta = file.path(out_dir, "geotrees_als_artic_indice_meta.csv"),
     parar = file.path(out_dir, "PARAR.txt"),
-    nas_log = file.path(out_dir, "geotrees_als_nas_log.csv")
+    nas_log = file.path(out_dir, "geotrees_als_nas_log.csv"),
+    nas_queue = file.path(out_dir, "geotrees_als_nas_queue.csv"),
+    nas_sync_lock = file.path(out_dir, ".geotrees_als_nas_sync.lock")
   )
 }
 
@@ -1994,6 +1997,36 @@ append_nas_log <- function(path, row) {
   }
 }
 
+`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1L && is.na(a))) b else a
+
+resolve_laz_path <- function(tile_id, laz_dir, hint = "") {
+  hint <- as.character(hint %||% "")
+  if (nzchar(hint)) {
+    hp <- suppressWarnings(normalizePath(hint, winslash = "/", mustWork = FALSE))
+    if (nzchar(hp) && file.exists(hp)) return(hp)
+  }
+  if (!nzchar(laz_dir) || !dir.exists(laz_dir)) return("")
+  tid <- toupper(trimws(as.character(tile_id %||% "")))
+  if (!nzchar(tid)) return("")
+  for (ext in c(".laz", ".las")) {
+    p <- file.path(laz_dir, paste0(tid, ext))
+    if (file.exists(p)) {
+      return(suppressWarnings(normalizePath(p, winslash = "/", mustWork = FALSE)))
+    }
+  }
+  # LAZ_DIR pode ter subpastas (ex. D:/2024/23/...).
+  esc <- gsub("([.|()\\^{}+$*?]|\\[|\\])", "\\\\\\1", tid)
+  hits <- list.files(
+    laz_dir,
+    pattern = paste0("^", esc, "\\.(laz|las)$"),
+    recursive = TRUE,
+    full.names = TRUE,
+    ignore.case = TRUE
+  )
+  if (!length(hits)) return("")
+  suppressWarnings(normalizePath(hits[[1]], winslash = "/", mustWork = FALSE))
+}
+
 maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
   if (!isTRUE(enabled)) return(invisible(FALSE))
   lp <- suppressWarnings(normalizePath(laz_path, winslash = "/", mustWork = FALSE))
@@ -2005,7 +2038,15 @@ maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
     say("AVISO: LAZ fora de LAZ_DIR; nao apaguei: ", lp)
     return(invisible(FALSE))
   }
-  ok <- isTRUE(unlink(lp) == 0L) && !file.exists(lp)
+  ok <- FALSE
+  try(ok <- isTRUE(file.remove(lp)) && !file.exists(lp), silent = TRUE)
+  if (!ok) {
+    try(unlink(lp, force = TRUE), silent = TRUE)
+    ok <- !file.exists(lp)
+  }
+  # Sidecar index LAStools, se existir
+  lax <- sub("\\.(laz|las)$", ".lax", lp, ignore.case = TRUE)
+  if (nzchar(lax) && file.exists(lax)) try(unlink(lax, force = TRUE), silent = TRUE)
   if (ok) say("LAZ removido (tile ok / status 1): ", basename(lp))
   else say("AVISO: falha ao apagar LAZ: ", lp)
   invisible(ok)
@@ -2040,32 +2081,33 @@ laz_catchup <- function(opt, paths, registry, plan = NULL) {
   }
 
   tiles <- list_tile_dirs(paths$processed)
-  if (!length(tiles)) return(invisible(0L))
+  if (!length(tiles)) {
+    say("LAZ catch-up: nenhuma pasta processada ainda.")
+    return(invisible(0L))
+  }
   say("LAZ catch-up: conferindo ", length(tiles), " pasta(s) em processed/...")
   n_del <- 0L
+  n_miss <- 0L
   for (k in tiles) {
     if (!nas_products_ok(k)) next
     tid <- toupper(basename(k))
-    lp <- if (exists(tid, envir = map, inherits = FALSE)) {
+    hint <- if (exists(tid, envir = map, inherits = FALSE)) {
       get(tid, envir = map, inherits = FALSE)
     } else {
       ""
     }
+    lp <- resolve_laz_path(tid, opt$laz_dir, hint)
     if (!nzchar(lp) || !file.exists(lp)) {
-      cands <- file.path(
-        opt$laz_dir,
-        c(
-          paste0(tid, ".laz"), paste0(tid, ".las"),
-          paste0(tolower(tid), ".laz"), paste0(tolower(tid), ".las")
-        )
-      )
-      hit <- cands[file.exists(cands)]
-      lp <- if (length(hit)) hit[[1]] else ""
+      n_miss <- n_miss + 1L
+      next
     }
-    if (!nzchar(lp) || !file.exists(lp)) next
     if (maybe_delete_laz(lp, opt$laz_dir, TRUE)) n_del <- n_del + 1L
   }
-  say("LAZ catch-up: ", n_del, " arquivo(s) removido(s).")
+  say(
+    "LAZ catch-up: ", n_del, " arquivo(s) removido(s)",
+    if (n_miss > 0L) paste0("; ", n_miss, " tile(s) ok sem .laz restante em LAZ_DIR") else "",
+    "."
+  )
   invisible(n_del)
 }
 
@@ -2111,7 +2153,44 @@ nas_finish_one <- function(res, paths, say_fn = say) {
   invisible(ok)
 }
 
-`%||%` <- function(a, b) if (is.null(a) || (length(a) == 1L && is.na(a))) b else a
+nas_queue_append <- function(path, row) {
+  dt <- data.table::as.data.table(row)
+  if (file.exists(path)) {
+    data.table::fwrite(dt, path, append = TRUE, col.names = FALSE)
+  } else {
+    data.table::fwrite(dt, path)
+  }
+}
+
+nas_launch_robocopy <- function(src, dest) {
+  src_w <- normalizePath(src, winslash = "\\", mustWork = TRUE)
+  dest_w <- chartr("/", "\\", gsub("\\\\", "/", dest))
+  dir.create(dest, recursive = TRUE, showWarnings = FALSE)
+  # Start-Process retorna na hora; robocopy segue em background (mais confiavel
+  # que system2(wait=FALSE) em alguns R/Windows).
+  arglist <- paste(
+    sapply(
+      c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
+      function(a) paste0("'", gsub("'", "''", a), "'")
+    ),
+    collapse = ","
+  )
+  ps <- paste0(
+    "Start-Process -FilePath robocopy -ArgumentList @(", arglist,
+    ") -WindowStyle Hidden"
+  )
+  rc <- tryCatch(
+    base::system2(
+      "powershell",
+      c("-NoProfile", "-Command", ps),
+      stdout = FALSE,
+      stderr = FALSE,
+      wait = TRUE
+    ),
+    error = function(e) 1L
+  )
+  isTRUE(is.null(rc) || (!is.na(rc) && rc == 0L))
+}
 
 nas_reap <- function(nas, paths, wait = FALSE, timeout_min = 120) {
   if (!isTRUE(nas$enabled) || !length(nas$jobs)) return(invisible(NULL))
@@ -2175,29 +2254,27 @@ nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
   delete_local <- isTRUE(nas$delete_local)
   src_n <- src
   dest_n <- dest
-  tid <- toupper(tile_id)
+  tid <- toupper(as.character(tile_id))
+  nas_queue_append(paths$nas_queue, list(
+    tile_id = tid,
+    src = src_n,
+    dest = dest_n,
+    layer = as.character(layer_artic %||% ""),
+    bloco = as.character(bloco %||% ""),
+    delete_local = as.character(delete_local),
+    status = "pending",
+    enqueued_utc = utc_now(),
+    erro = ""
+  ))
   launched <- FALSE
   if (.Platform$OS.type == "windows") {
-    src_w <- normalizePath(src_n, winslash = "\\", mustWork = TRUE)
-    dest_w <- chartr("/", "\\", gsub("\\\\", "/", dest_n))
-    dir.create(dest_n, recursive = TRUE, showWarnings = FALSE)
-    # Background: nao bloqueia o proximo tile; sem future::plan.
-    tryCatch(
-      {
-        base::system2(
-          "robocopy",
-          c(src_w, dest_w, "/E", "/R:2", "/W:5", "/NFL", "/NDL", "/NJH", "/NJS", "/NP"),
-          stdout = FALSE,
-          stderr = FALSE,
-          wait = FALSE
-        )
-        launched <- TRUE
-      },
+    launched <- isTRUE(tryCatch(
+      nas_launch_robocopy(src_n, dest_n),
       error = function(e) {
         say("AVISO NAS: falha ao iniciar robocopy: ", conditionMessage(e))
-        launched <<- FALSE
+        FALSE
       }
-    )
+    ))
   }
   if (isTRUE(launched)) {
     nas$jobs[[length(nas$jobs) + 1L]] <- list(
@@ -2205,6 +2282,7 @@ nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
       delete_local = delete_local, t0 = Sys.time()
     )
   } else {
+    say("NAS: fallback copia sincrona para ", tid)
     ok <- tryCatch(nas_copy_tree(src_n, dest_n), error = function(e) FALSE)
     nas_finish_one(
       list(
@@ -2218,11 +2296,19 @@ nas_enqueue <- function(nas, paths, src, layer_artic, bloco, tile_id) {
   invisible(TRUE)
 }
 
-nas_shutdown <- function(nas, paths) {
+nas_shutdown <- function(nas, paths, wait = FALSE) {
   if (!isTRUE(nas$enabled) || isTRUE(nas$done)) return(invisible(NULL))
-  if (length(nas$jobs)) {
-    say("NAS: aguardando ", length(nas$jobs), " copia(s) em andamento...")
+  n_job <- length(nas$jobs)
+  if (n_job && isTRUE(wait)) {
+    say("NAS: aguardando ", n_job, " copia(s) em andamento...")
     nas_reap(nas, paths, wait = TRUE)
+  } else if (n_job) {
+    # Nao bloqueia o fim do batch: copias seguem em background; proximo run faz catch-up.
+    say(
+      "NAS: ", n_job, " copia(s) ainda em andamento (nao vou esperar).",
+      " Proximo run faz catch-up se faltar."
+    )
+    nas_reap(nas, paths, wait = FALSE)
   }
   nas$done <- TRUE
   invisible(NULL)
@@ -2470,6 +2556,23 @@ stop_lock_busy <- function(...) {
   stop(cond)
 }
 
+release_lock <- function(path, say_fn = NULL) {
+  path <- as.character(path %||% "")
+  if (!nzchar(path)) return(invisible(TRUE))
+  if (!file.exists(path)) return(invisible(TRUE))
+  try(unlink(path, force = TRUE), silent = TRUE)
+  if (file.exists(path)) {
+    Sys.sleep(0.25)
+    try(unlink(path, force = TRUE), silent = TRUE)
+  }
+  ok <- !file.exists(path)
+  if (!is.null(say_fn)) {
+    if (ok) say_fn("Trava removida: ", path)
+    else say_fn("AVISO: nao consegui remover a trava: ", path)
+  }
+  invisible(ok)
+}
+
 acquire_lock <- function(path) {
   if (file.exists(path)) {
     pid <- read_lock_pid(path)
@@ -2488,10 +2591,31 @@ acquire_lock <- function(path) {
       " nao esta mais rodando). Vou remove-la e continuar.\n",
       sep = ""
     )
-    unlink(path)
+    release_lock(path)
   }
   writeLines(c(maquina(), usuario(), utc_now(), paste0("pid=", Sys.getpid())), path)
   invisible(TRUE)
+}
+
+# Remove articulacao_cache.gpkg quando a API/local queue esta em dia.
+maybe_drop_artic_cache <- function(paths, als, pending_als) {
+  if (!isTRUE(als$enabled)) return(invisible(FALSE))
+  if (length(pending_als)) return(invisible(FALSE))
+  if (exists("als_queue_load", mode = "function")) {
+    disk_q <- tryCatch(als_queue_load(paths$root), error = function(e) list(1))
+    if (length(disk_q)) return(invisible(FALSE))
+  } else {
+    qpath <- tryCatch(als_queue_path(paths$root), error = function(e) "")
+    if (nzchar(qpath) && file.exists(qpath)) return(invisible(FALSE))
+  }
+  if (!file.exists(paths$artic_cache)) return(invisible(FALSE))
+  try(unlink(paths$artic_cache, force = TRUE), silent = TRUE)
+  if (!file.exists(paths$artic_cache)) {
+    say("Cache de articulacao removido (API em dia): ", paths$artic_cache)
+    return(invisible(TRUE))
+  }
+  say("AVISO: nao consegui remover cache de articulacao: ", paths$artic_cache)
+  invisible(FALSE)
 }
 
 resolve_cores <- function(n) {
@@ -2539,8 +2663,12 @@ main <- function() {
 
   paths <- out_paths(opt$out_dir)
   dir.create(paths$root, recursive = TRUE, showWarnings = FALSE)
+  lock_held <- FALSE
   acquire_lock(paths$lock)
-  on.exit(unlink(paths$lock), add = TRUE)
+  lock_held <- TRUE
+  on.exit({
+    if (isTRUE(lock_held)) release_lock(paths$lock)
+  }, add = TRUE)
 
   if (grepl("OneDrive|Dropbox|Google Drive", paths$root, ignore.case = TRUE)) {
     cat("AVISO: OUT_DIR esta numa pasta sincronizada. O tmp do GeoTrees fica lento. Use um disco local, por exemplo D:/geotrees_als\n")
@@ -2718,13 +2846,15 @@ main <- function() {
   if (is.null(fila) || !nrow(fila)) {
     # Mesmo sem tile novo: catch-up NAS + limpeza LAZ (rodadas anteriores).
     nas <- nas_init(opt)
-    on.exit(nas_shutdown(nas, paths), add = TRUE)
+    on.exit(nas_shutdown(nas, paths, wait = FALSE), add = TRUE)
     if (isTRUE(nas$enabled)) nas_catchup(nas, paths, registry, idx)
     laz_catchup(opt, paths, registry, plan)
-    nas_shutdown(nas, paths)
-    if (artic_ok && nrow(registry)) {
+    nas_shutdown(nas, paths, wait = FALSE)
+    if (artic_ok && nrow(registry) && file.exists(paths$artic_cache)) {
       rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
     }
+    release_lock(paths$lock, say)
+    lock_held <- FALSE
     dest <- write_md("rodada")
     cat("Nada novo para processar.\nRelatorio: ", dest, "\n", sep = "")
     return(0L)
@@ -2767,7 +2897,7 @@ main <- function() {
     debug = isTRUE(opt$debug)
   )
   nas <- nas_init(opt)
-  on.exit(nas_shutdown(nas, paths), add = TRUE)
+  on.exit(nas_shutdown(nas, paths, wait = FALSE), add = TRUE)
   say("Apagar LAZ apos tile ok (status 1): ", isTRUE(opt$delete_laz_on_ok))
   if (isTRUE(nas$enabled)) {
     nas_catchup(nas, paths, registry, idx)
@@ -2981,7 +3111,8 @@ main <- function() {
       append_problema(paths$problemas, meta$tile_id, result$erro)
     }
     if (identical(als_code, 1L)) {
-      maybe_delete_laz(meta$laz_path, opt$laz_dir, opt$delete_laz_on_ok)
+      lp_del <- resolve_laz_path(meta$tile_id, opt$laz_dir, meta$laz_path)
+      maybe_delete_laz(lp_del, opt$laz_dir, opt$delete_laz_on_ok)
       if (isTRUE(nas$enabled) && nzchar(as.character(result$pasta_saida %||% ""))) {
         nas_enqueue(
           nas, paths, result$pasta_saida,
@@ -3072,7 +3203,11 @@ main <- function() {
   progress_bar(n_fila, n_fila, "fila desta rodada concluida")
   progress_done()
 
-  nas_shutdown(nas, paths)
+  # Libera a trava antes de qualquer espera residual do NAS.
+  release_lock(paths$lock, say)
+  lock_held <- FALSE
+
+  nas_shutdown(nas, paths, wait = FALSE)
 
   if (als$enabled) {
     say("ALS flush final...")
@@ -3082,13 +3217,15 @@ main <- function() {
     }
   }
 
-  if (artic_ok && nrow(registry)) {
+  if (artic_ok && nrow(registry) && file.exists(paths$artic_cache)) {
     cat("Fechando GPKG do registro...\n")
     tryCatch(
       rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer),
       error = function(e) log_line(paths$runlog, "AVISO rebuild GPKG: ", conditionMessage(e))
     )
   }
+  # Depois do rebuild: se a nuvem/fila local esta em dia, remove o cache da articulacao.
+  if (als$enabled) maybe_drop_artic_cache(paths, als, pending_als)
   modo_fim <- if (parou) "parado" else "rodada"
   dest <- write_md(modo_fim)
   cat("\nRelatorio: ", dest, "\n", sep = "")
