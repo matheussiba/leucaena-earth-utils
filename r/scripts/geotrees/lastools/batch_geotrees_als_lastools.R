@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.5.2-lastools"
+VERSION <- "1.5.3-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -1071,8 +1071,9 @@ dedupe_lidar <- function(files) {
 
 save_laz_index <- function(path, meta_path, inv, laz_dir, n_brutos = NA_integer_) {
   atomic_write(path, function(tmp) data.table::fwrite(inv$dt, tmp, bom = TRUE))
-  if (is.na(n_brutos) || n_brutos < 0L) {
-    n_brutos <- as.integer(nrow(inv$dt) + inv$n_dup)
+  n_brutos <- suppressWarnings(as.integer(n_brutos[[1]]))
+  if (length(n_brutos) != 1L || is.na(n_brutos) || n_brutos < 0L) {
+    n_brutos <- as.integer(nrow(inv$dt) + as.integer(inv$n_dup %||% 0L))
   }
   meta <- data.table::data.table(
     laz_dir = laz_dir,
@@ -1084,6 +1085,12 @@ save_laz_index <- function(path, meta_path, inv, laz_dir, n_brutos = NA_integer_
   atomic_write(meta_path, function(tmp) data.table::fwrite(meta, tmp, bom = TRUE))
 }
 
+safe_int1 <- function(x, default = NA_integer_) {
+  if (is.null(x) || length(x) < 1L) return(default)
+  v <- suppressWarnings(as.integer(x[[1]]))
+  if (length(v) != 1L || is.na(v)) default else v
+}
+
 load_laz_index <- function(path, meta_path, laz_dir, n_brutos_agora = NA_integer_) {
   if (!file.exists(path) || !file.exists(meta_path)) return(NULL)
   meta <- tryCatch(
@@ -1091,21 +1098,21 @@ load_laz_index <- function(path, meta_path, laz_dir, n_brutos_agora = NA_integer
     error = function(e) NULL
   )
   if (is.null(meta) || !nrow(meta) || !all(c("laz_dir", "n_dup") %in% names(meta))) return(NULL)
-  if (!identical(tolower(meta$laz_dir[[1]]), tolower(laz_dir))) {
+  if (!identical(tolower(as.character(meta$laz_dir[[1]])), tolower(laz_dir))) {
     say("O indice de LAZ salvo e de outra pasta. Vou ler ", laz_dir, " de novo.")
     return(NULL)
   }
-  n_meta <- suppressWarnings(as.integer(meta$n_brutos[[1]]))
+  # Indice antigo pode nao ter n_brutos (coluna ausente -> NULL -> if(NA/length0) quebrava).
+  n_meta <- if ("n_brutos" %in% names(meta)) safe_int1(meta$n_brutos) else NA_integer_
   if (is.na(n_meta) && "n_arquivos" %in% names(meta)) {
-    # Indice antigo: so tinha unicos; se a pasta tem bem mais arquivos, revarre.
-    n_uni <- suppressWarnings(as.integer(meta$n_arquivos[[1]]))
-    n_dup_m <- suppressWarnings(as.integer(meta$n_dup[[1]]))
-    if (is.na(n_dup_m)) n_dup_m <- 0L
-    if (!is.na(n_uni)) n_meta <- n_uni + n_dup_m
+    n_uni <- safe_int1(meta$n_arquivos)
+    n_dup_m <- safe_int1(meta$n_dup, 0L)
+    if (!is.na(n_uni)) n_meta <- as.integer(n_uni + n_dup_m)
   }
-  if (!is.na(n_brutos_agora) && !is.na(n_meta) && as.integer(n_brutos_agora) != as.integer(n_meta)) {
+  n_agora <- safe_int1(n_brutos_agora)
+  if (!is.na(n_agora) && !is.na(n_meta) && n_agora != n_meta) {
     say(
-      "Pasta LAZ mudou desde o indice (", n_meta, " -> ", n_brutos_agora,
+      "Pasta LAZ mudou desde o indice (", n_meta, " -> ", n_agora,
       " arquivo(s)). Vou ler de novo."
     )
     return(NULL)
@@ -1119,16 +1126,17 @@ load_laz_index <- function(path, meta_path, laz_dir, n_brutos_agora = NA_integer
   dt <- dt[, ..precisa]
   dt[, tamanho_mb := suppressWarnings(as.numeric(tamanho_mb))]
   dt[, tile_id := toupper(trimws(tile_id))]
-  dt <- dt[nzchar(tile_id) & nzchar(laz_path)]
-  n_copc <- sum(grepl("\\.copc\\.laz$", dt$laz_path, ignore.case = TRUE))
-  if (n_copc > 0L) {
+  dt <- dt[!is.na(tile_id) & !is.na(laz_path) & nzchar(tile_id) & nzchar(laz_path)]
+  n_copc <- sum(grepl("\\.copc\\.laz$", dt$laz_path, ignore.case = TRUE), na.rm = TRUE)
+  if (isTRUE(n_copc > 0L)) {
     say("Indice tinha ", n_copc, " .copc.laz; removidos da fila (lasR nao abre COPC).")
     dt <- dt[!grepl("\\.copc\\.laz$", laz_path, ignore.case = TRUE)]
   }
-  n_dup <- suppressWarnings(as.integer(meta$n_dup[[1]]))
-  if (is.na(n_dup)) n_dup <- 0L
-  say("Indice de LAZ reutilizado: ", nrow(dt), " tile(s) unicos (pasta ainda com ",
-      if (is.na(n_brutos_agora)) "?" else n_brutos_agora, " arquivo(s)).")
+  n_dup <- safe_int1(meta$n_dup, 0L)
+  say(
+    "Indice de LAZ reutilizado: ", nrow(dt), " tile(s) unicos (pasta ainda com ",
+    if (is.na(n_agora)) "?" else n_agora, " arquivo(s))."
+  )
   say("  ", path)
   list(dt = dt, n_dup = n_dup)
 }
