@@ -181,7 +181,6 @@ if not "%RC%"=="0" (
   echo Terminou com codigo 0.
 )
 echo Relatorio: %OUT_DIR%\geotrees_als_relatorio.md
-echo Registro:  %OUT_DIR%\geotrees_als_registry.csv
-echo GPKG:      %OUT_DIR%\geotrees_als_registro.gpkg
+echo Registro:  %OUT_DIR%\geotrees_als_registro.gpkg
 echo NAS log:   %OUT_DIR%\geotrees_als_nas_log.csv
 exit /b %RC%

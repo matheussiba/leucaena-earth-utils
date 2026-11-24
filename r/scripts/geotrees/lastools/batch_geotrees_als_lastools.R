@@ -6,8 +6,9 @@
 #      (utm = 22 para EPSG 32722, 23 para 32723)
 #   2. senao roda o GeoTrees so naquele arquivo via LAStools (staging em tmp;
 #      so promove para processed/<utm>/<tile> quando terminar ok)
-#   3. grava o tile no CSV, no historico e no GPKG de registro
+#   3. grava o tile no historico e no GPKG de registro (rebuild a cada rodada)
 #   4. problemas da rodada em geotrees_als_problemas.txt
+#   Relatorio: so geotrees_als_relatorio.md | Registro: so geotrees_als_registro.gpkg
 #
 # Limite de tempo: --max-hours (padrao 24). A checagem e entre tiles.
 # Parar no meio: PARAR.txt em OUT_DIR.
@@ -18,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.4.0-lastools"
+VERSION <- "1.5.0-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -537,25 +538,42 @@ out_paths <- function(out_dir) {
     tmp = file.path(out_dir, "tmp"),
     inbox = file.path(out_dir, "_inbox"),
     logs = file.path(out_dir, "logs"),
-    registry = file.path(out_dir, "geotrees_als_registry.csv"),
     historico = file.path(out_dir, "geotrees_als_historico.csv"),
     problemas = file.path(out_dir, "geotrees_als_problemas.txt"),
     gpkg = file.path(out_dir, "geotrees_als_registro.gpkg"),
     md = file.path(out_dir, "geotrees_als_relatorio.md"),
     plano = file.path(out_dir, "geotrees_als_plano.md"),
-    summary = file.path(out_dir, "geotrees_als_summary.csv"),
     lock = file.path(out_dir, ".geotrees_als_lastools.lock"),
     runlog = file.path(out_dir, "geotrees_als_run.log"),
-    artic_cache = file.path(out_dir, "articulacao_cache.gpkg"),
     laz_index = file.path(out_dir, "geotrees_als_laz_indice.csv"),
     laz_index_meta = file.path(out_dir, "geotrees_als_laz_indice_meta.csv"),
-    artic_index = file.path(out_dir, "geotrees_als_artic_indice.csv"),
-    artic_index_meta = file.path(out_dir, "geotrees_als_artic_indice_meta.csv"),
     parar = file.path(out_dir, "PARAR.txt"),
     nas_log = file.path(out_dir, "geotrees_als_nas_log.csv"),
     nas_queue = file.path(out_dir, "geotrees_als_nas_queue.csv"),
     nas_sync_lock = file.path(out_dir, ".geotrees_als_nas_sync.lock")
   )
+}
+
+# Remove artefatos antigos que nao usamos mais (CSV registro, summary, caches).
+cleanup_legacy_outdir <- function(root) {
+  legacy <- c(
+    "geotrees_als_registry.csv",
+    "geotrees_als_summary.csv",
+    "articulacao_cache.gpkg",
+    "geotrees_als_artic_indice.csv",
+    "geotrees_als_artic_indice_meta.csv"
+  )
+  n <- 0L
+  for (nm in legacy) {
+    f <- file.path(root, nm)
+    if (!file.exists(f)) next
+    unlink(f, force = TRUE)
+    unlink(paste0(f, "-wal"), force = TRUE)
+    unlink(paste0(f, "-shm"), force = TRUE)
+    n <- n + 1L
+  }
+  if (n > 0L) say("Limpeza: removi ", n, " arquivo(s) legado(s) do OUT_DIR.")
+  invisible(n)
 }
 
 utm_zone_folder <- function(epsg) {
@@ -655,27 +673,6 @@ build_index <- function(raw) {
     ))
   }
   pieces[!duplicated(tile_id)]
-}
-
-ensure_artic_cache <- function(src, dest) {
-  copy <- !file.exists(dest)
-  if (!copy) {
-    a <- file.info(src)
-    b <- file.info(dest)
-    copy <- is.na(b$size) || a$size != b$size || a$mtime > b$mtime + 1
-  }
-  if (copy) {
-    say("Copiando a articulacao para o cache da saida:")
-    say("  ", dest)
-    ok <- file.copy(src, dest, overwrite = TRUE)
-    if (!ok) stop("Nao copiei a articulacao para ", dest, call. = FALSE)
-    unlink(paste0(dest, "-wal"))
-    unlink(paste0(dest, "-shm"))
-    say("Cache da articulacao gravado.")
-  } else {
-    say("Cache da articulacao ja esta em dia: ", dest)
-  }
-  dest
 }
 
 geom_one <- function(cache, layer, tile_id) {
@@ -1647,39 +1644,6 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
   linhas
 }
 
-save_summary <- function(path, opt, registry, plan, rodada, elapsed_min, modo) {
-  n_reg <- nrow(registry)
-  stats <- list(
-    c("modo", modo, ""),
-    c("maquina", maquina(), ""),
-    c("laz_dir", opt$laz_dir, ""),
-    c("bloco_filtro", if (nzchar(opt$bloco)) opt$bloco else "*", ""),
-    c("out_dir", opt$out_dir, ""),
-    c("arquivos_na_pasta", if (is.null(plan)) 0L else nrow(plan), "unicos por nome"),
-    c("pulados", if (is.null(plan)) 0L else sum(plan$acao == "pular"), "ja tinham produto"),
-    c("fila", if (is.null(plan)) 0L else sum(plan$acao == "processar"), "iriam ou foram processar"),
-    c("ok_nesta_rodada", if (is.null(rodada) || !nrow(rodada)) 0L else sum(rodada$status == "processed"), ""),
-    c("erro_nesta_rodada", if (is.null(rodada) || !nrow(rodada)) 0L else sum(rodada$status == "erro"), ""),
-    c("processados_acumulado", if (n_reg) sum(registry$status == "processed") else 0L, "registro"),
-    c("erros_acumulado", if (n_reg) sum(registry$status == "erro") else 0L, "serao tentados de novo"),
-    c("minutos_rodada", fmt_num(elapsed_min, 2), ""),
-    c("atualizado_utc", utc_now(), "")
-  )
-  eta_s <- eta_agora(rodada, registry, faltam_na_rodada(plan, rodada))
-  stats <- c(stats, list(
-    c("faltam", faltam_na_rodada(plan, rodada), "ainda na fila desta selecao"),
-    c("media_min", if (is.na(eta_s$media_min)) "" else fmt_num(eta_s$media_min, 2), "tiles ok nesta maquina"),
-    c("restante", eta_s$texto, "dias, horas e minutos"),
-    c("previsao_termino", eta_s$previsao, "horario local")
-  ))
-  atomic_write(path, function(tmp) {
-    data.table::fwrite(
-      data.table::rbindlist(lapply(stats, function(x) data.table::data.table(metrica = x[[1]], valor = x[[2]], nota = x[[3]]))),
-      tmp, bom = TRUE
-    )
-  })
-}
-
 # ---------------------------------------------------------------------------
 # Processar um tile
 # ---------------------------------------------------------------------------
@@ -2597,26 +2561,6 @@ acquire_lock <- function(path) {
   invisible(TRUE)
 }
 
-# Remove articulacao_cache.gpkg quando a API/local queue esta em dia.
-maybe_drop_artic_cache <- function(paths, als, pending_als) {
-  if (!isTRUE(als$enabled)) return(invisible(FALSE))
-  if (length(pending_als)) return(invisible(FALSE))
-  if (exists("als_queue_load", mode = "function")) {
-    disk_q <- tryCatch(als_queue_load(paths$root), error = function(e) list(1))
-    if (length(disk_q)) return(invisible(FALSE))
-  } else {
-    qpath <- tryCatch(als_queue_path(paths$root), error = function(e) "")
-    if (nzchar(qpath) && file.exists(qpath)) return(invisible(FALSE))
-  }
-  if (!file.exists(paths$artic_cache)) return(invisible(FALSE))
-  try(unlink(paths$artic_cache, force = TRUE), silent = TRUE)
-  if (!file.exists(paths$artic_cache)) {
-    say("Cache de articulacao removido (API em dia): ", paths$artic_cache)
-    return(invisible(TRUE))
-  }
-  say("AVISO: nao consegui remover cache de articulacao: ", paths$artic_cache)
-  invisible(FALSE)
-}
 
 resolve_cores <- function(n) {
   if (!is.na(n)) return(as.integer(n))
@@ -2690,37 +2634,34 @@ main <- function() {
     cat("  articulacao-igc-merged-spatialindex-sirgas2000.gpkg\n")
     cat("Ou passe --articulacao com o caminho do arquivo.\n")
   } else {
-    cached_idx <- load_artic_index(paths$artic_index, paths$artic_index_meta, opt$articulacao)
-    if (!is.null(cached_idx)) {
-      idx <- cached_idx
-      say("Indice da articulacao (cache): ", nrow(idx), " id(s).")
-    } else {
-      say("Lendo articulacao (atributos): ", opt$articulacao)
-      artic_tab <- read_artic_table(opt$articulacao, opt$articulacao_layer)
-      say_debug("Montando o indice NOMENC_2K / NOMENC_5K / NOMENC_10K...")
-      idx <- build_index(artic_tab)
-      save_artic_index(paths$artic_index, paths$artic_index_meta, idx, opt$articulacao)
-      say("Indice da articulacao gravado (", nrow(idx), " id(s)).")
-      say_debug("  ", paths$artic_index)
-    }
+    say("Lendo articulacao (atributos): ", opt$articulacao)
+    artic_tab <- read_artic_table(opt$articulacao, opt$articulacao_layer)
+    say_debug("Montando o indice NOMENC_2K / NOMENC_5K / NOMENC_10K...")
+    idx <- build_index(artic_tab)
+    say("Indice da articulacao em memoria: ", nrow(idx), " id(s).")
   }
 
-  say("Lendo registro: ", paths$registry)
-  registry <- load_registry(paths$registry)
-  say("Registro: ", nrow(registry), " linha(s).")
-  known_ids <- if (nrow(registry)) as.character(registry[status == "processed", tile_id]) else character()
-  known_ids <- known_ids[!is.na(known_ids) & nzchar(known_ids)]
+  # Registro so em GPKG; a cada rodada comeca zerado a partir de processed/.
+  cleanup_legacy_outdir(paths$root)
+  say("Registro: zerado nesta rodada; fonte = pastas OK em processed/ (+ GPKG no fim).")
+  registry <- empty_registry()
   if (!opt$dry_run && !opt$report_only) {
     say_debug("Limpando pastas incompletas em processed/ (sem _INFO_summary_processing.csv)...")
     n_prune <- prune_incomplete_processed(paths$processed)
     if (n_prune > 0L) say("  pastas incompletas removidas: ", n_prune)
   }
-  done <- scan_done(paths$processed, known_ids)
+  done <- scan_done(paths$processed, character())
   if (!opt$dry_run) {
-    say_debug("Cruzando o registro com os tiles prontos e com a articulacao...")
+    if (file.exists(paths$gpkg)) {
+      unlink(paths$gpkg, force = TRUE)
+      unlink(paste0(paths$gpkg, "-wal"), force = TRUE)
+      unlink(paste0(paths$gpkg, "-shm"), force = TRUE)
+      say("GPKG de registro anterior removido (rebuild nesta rodada).")
+    }
+    say_debug("Montando registro a partir de processed/ + articulacao...")
     registry <- adopt_disk(registry, done, maquina(), usuario())
     registry <- fill_artic_on_registry(registry, idx)
-    say_debug("Registro cruzado.")
+    say("Registro em memoria: ", nrow(registry), " tile(s) ja prontos no disco.")
   }
   done_ids <- if (opt$force) character() else done$tile_id
 
@@ -2754,11 +2695,11 @@ main <- function() {
   if (!opt$dry_run) {
     say("Completando caminhos de LAZ no registro...")
     registry <- fill_laz_from_plan(registry, plan)
-    if (nrow(registry)) {
-      say("Gravando registro: ", paths$registry)
-      save_registry(paths$registry, registry)
-      say("Registro gravado.")
-    } else {
+    if (artic_ok && nrow(registry)) {
+      say("Gravando registro GPKG (tiles ja prontos): ", paths$gpkg)
+      rebuild_gpkg(paths$gpkg, registry, opt$articulacao, opt$articulacao_layer)
+      say("Registro GPKG gravado.")
+    } else if (!nrow(registry)) {
       say("Registro ainda vazio. Nada para gravar agora.")
     }
   }
@@ -2805,9 +2746,6 @@ main <- function() {
     linhas <- build_report(opt, paths, registry, hist, plan, rodada, blocos, n_dup, modo, elapsed)
     dest <- if (modo %in% c("dry", "lista")) paths$plano else paths$md
     write_utf8(dest, linhas)
-    if (!modo %in% c("dry", "lista")) {
-      save_summary(paths$summary, opt, registry, plan, rodada, elapsed, modo)
-    }
     dest
   }
 
@@ -2828,17 +2766,15 @@ main <- function() {
     return(0L)
   }
 
-  if (artic_ok) ensure_artic_cache(opt$articulacao, paths$artic_cache)
-
   if (opt$report_only) {
     if (artic_ok && nrow(registry)) {
       say("Atualizando GPKG do registro...")
-      rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
+      rebuild_gpkg(paths$gpkg, registry, opt$articulacao, opt$articulacao_layer)
       say("GPKG atualizado.")
     }
     dest <- write_md("report")
     cat("Relatorio: ", dest, "\n", sep = "")
-    cat("GPKG:      ", paths$gpkg, "\n", sep = "")
+    cat("Registro:  ", paths$gpkg, "\n", sep = "")
     return(0L)
   }
 
@@ -2850,13 +2786,14 @@ main <- function() {
     if (isTRUE(nas$enabled)) nas_catchup(nas, paths, registry, idx)
     laz_catchup(opt, paths, registry, plan)
     nas_shutdown(nas, paths, wait = FALSE)
-    if (artic_ok && nrow(registry) && file.exists(paths$artic_cache)) {
-      rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer)
+    if (artic_ok && nrow(registry)) {
+      rebuild_gpkg(paths$gpkg, registry, opt$articulacao, opt$articulacao_layer)
     }
     release_lock(paths$lock, say)
     lock_held <- FALSE
     dest <- write_md("rodada")
     cat("Nada novo para processar.\nRelatorio: ", dest, "\n", sep = "")
+    cat("Registro:  ", paths$gpkg, "\n", sep = "")
     return(0L)
   }
 
@@ -2984,7 +2921,14 @@ main <- function() {
         origem = "pipeline"
       )
       registry <- put_registry(registry, row)
-      save_registry(paths$registry, registry)
+      if (artic_ok) {
+        tryCatch({
+          feature <- row_to_sf(row, geom_one(opt$articulacao, opt$articulacao_layer, row$tile_id))
+          upsert_gpkg(paths$gpkg, feature)
+        }, error = function(e) {
+          log_line(paths$runlog, "AVISO GPKG ", row$tile_id, ": ", conditionMessage(e))
+        })
+      }
       append_historico(paths$historico, list(
         rodada_id = row$rodada_id,
         tile_id = row$tile_id,
@@ -3145,7 +3089,6 @@ main <- function() {
       origem = "pipeline"
     )
     registry <- put_registry(registry, row)
-    save_registry(paths$registry, registry)
     append_historico(paths$historico, list(
       rodada_id = row$rodada_id,
       tile_id = row$tile_id,
@@ -3169,7 +3112,7 @@ main <- function() {
     )), fill = TRUE)
     if (artic_ok) {
       tryCatch({
-        feature <- row_to_sf(row, geom_one(paths$artic_cache, opt$articulacao_layer, row$tile_id))
+        feature <- row_to_sf(row, geom_one(opt$articulacao, opt$articulacao_layer, row$tile_id))
         upsert_gpkg(paths$gpkg, feature)
       }, error = function(e) {
         log_line(paths$runlog, "AVISO GPKG ", row$tile_id, ": ", conditionMessage(e))
@@ -3217,20 +3160,17 @@ main <- function() {
     }
   }
 
-  if (artic_ok && nrow(registry) && file.exists(paths$artic_cache)) {
+  if (artic_ok && nrow(registry)) {
     cat("Fechando GPKG do registro...\n")
     tryCatch(
-      rebuild_gpkg(paths$gpkg, registry, paths$artic_cache, opt$articulacao_layer),
+      rebuild_gpkg(paths$gpkg, registry, opt$articulacao, opt$articulacao_layer),
       error = function(e) log_line(paths$runlog, "AVISO rebuild GPKG: ", conditionMessage(e))
     )
   }
-  # Depois do rebuild: se a nuvem/fila local esta em dia, remove o cache da articulacao.
-  if (als$enabled) maybe_drop_artic_cache(paths, als, pending_als)
   modo_fim <- if (parou) "parado" else "rodada"
   dest <- write_md(modo_fim)
   cat("\nRelatorio: ", dest, "\n", sep = "")
-  cat("Registro:  ", paths$registry, "\n", sep = "")
-  cat("GPKG:      ", paths$gpkg, "\n", sep = "")
+  cat("Registro:  ", paths$gpkg, "\n", sep = "")
   if (n_erro_run > 0L) 1L else 0L
 }
 
