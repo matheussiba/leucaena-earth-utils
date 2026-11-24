@@ -6,12 +6,12 @@
 #      (utm = 22 para EPSG 32722, 23 para 32723)
 #   2. senao roda o GeoTrees so naquele arquivo via LAStools (staging em tmp;
 #      so promove para processed/<utm>/<tile> quando terminar ok)
-#   3. grava o tile no historico e no GPKG de registro (rebuild a cada rodada)
-#   4. problemas da rodada em geotrees_als_problemas.txt
-#   Relatorio: so geotrees_als_relatorio.md | Registro: so geotrees_als_registro.gpkg
+#   3. grava o tile no history CSV e no GPKG de registro (rebuild a cada rodada)
+#   4. problemas da rodada em geotrees_als_problems.txt
+#   Report: geotrees_als_report.md | Registry: geotrees_als_registry.gpkg
 #
 # Limite de tempo: --max-hours (padrao 24). A checagem e entre tiles.
-# Parar no meio: PARAR.txt em OUT_DIR.
+# Parar no meio: STOP.txt em OUT_DIR.
 #
 # Uso:
 #   Rscript batch_geotrees_als_lastools.R
@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.5.4-lastools"
+VERSION <- "1.6.0-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -342,7 +342,7 @@ help_text <- function() {
     "                        no inicio faz catch-up dos ja processados)",
     "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
-    "Parar: PARAR.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
+    "Parar: STOP.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
     "NAS: <nas>/<Fehidro|Lote04|Voo22>/<BLOCO>/<tile> (layer da articulacao);",
     "     copia em background; fila geotrees_als_nas_queue.csv."
   )
@@ -537,21 +537,65 @@ out_paths <- function(out_dir) {
     processed = file.path(out_dir, "processed"),
     tmp = file.path(out_dir, "tmp"),
     inbox = file.path(out_dir, "_inbox"),
+    staging = file.path(out_dir, "_staging"),
     logs = file.path(out_dir, "logs"),
-    historico = file.path(out_dir, "geotrees_als_historico.csv"),
-    problemas = file.path(out_dir, "geotrees_als_problemas.txt"),
-    gpkg = file.path(out_dir, "geotrees_als_registro.gpkg"),
-    md = file.path(out_dir, "geotrees_als_relatorio.md"),
-    plano = file.path(out_dir, "geotrees_als_plano.md"),
+    history = file.path(out_dir, "geotrees_als_history.csv"),
+    problems = file.path(out_dir, "geotrees_als_problems.txt"),
+    gpkg = file.path(out_dir, "geotrees_als_registry.gpkg"),
+    report = file.path(out_dir, "geotrees_als_report.md"),
+    plan = file.path(out_dir, "geotrees_als_plan.md"),
     lock = file.path(out_dir, ".geotrees_als_lastools.lock"),
     runlog = file.path(out_dir, "geotrees_als_run.log"),
-    laz_index = file.path(out_dir, "geotrees_als_laz_indice.csv"),
-    laz_index_meta = file.path(out_dir, "geotrees_als_laz_indice_meta.csv"),
-    parar = file.path(out_dir, "PARAR.txt"),
+    laz_index = file.path(out_dir, "geotrees_als_laz_index.csv"),
+    laz_index_meta = file.path(out_dir, "geotrees_als_laz_index_meta.csv"),
+    stop = file.path(out_dir, "STOP.txt"),
     nas_log = file.path(out_dir, "geotrees_als_nas_log.csv"),
     nas_queue = file.path(out_dir, "geotrees_als_nas_queue.csv"),
     nas_sync_lock = file.path(out_dir, ".geotrees_als_nas_sync.lock")
   )
+}
+
+# Renomeia artefatos PT -> EN se o nome novo ainda nao existir.
+migrate_outdir_english_names <- function(root) {
+  map <- c(
+    "geotrees_als_historico.csv" = "geotrees_als_history.csv",
+    "geotrees_als_problemas.txt" = "geotrees_als_problems.txt",
+    "geotrees_als_registro.gpkg" = "geotrees_als_registry.gpkg",
+    "geotrees_als_relatorio.md" = "geotrees_als_report.md",
+    "geotrees_als_plano.md" = "geotrees_als_plan.md",
+    "geotrees_als_laz_indice.csv" = "geotrees_als_laz_index.csv",
+    "geotrees_als_laz_indice_meta.csv" = "geotrees_als_laz_index_meta.csv",
+    "PARAR.txt" = "STOP.txt"
+  )
+  n <- 0L
+  for (old in names(map)) {
+    fo <- file.path(root, old)
+    fn <- file.path(root, map[[old]])
+    if (!file.exists(fo)) next
+    if (!file.exists(fn)) {
+      ok <- FALSE
+      try(ok <- isTRUE(file.rename(fo, fn)), silent = TRUE)
+      if (ok) n <- n + 1L
+      # sidecars do GPKG antigo
+      if (grepl("\\.gpkg$", old, ignore.case = TRUE)) {
+        for (sfx in c("-wal", "-shm")) {
+          so <- paste0(fo, sfx)
+          sn <- paste0(fn, sfx)
+          if (file.exists(so) && !file.exists(sn)) try(file.rename(so, sn), silent = TRUE)
+          else if (file.exists(so)) unlink(so, force = TRUE)
+        }
+      }
+    } else {
+      unlink(fo, force = TRUE)
+      if (grepl("\\.gpkg$", old, ignore.case = TRUE)) {
+        unlink(paste0(fo, "-wal"), force = TRUE)
+        unlink(paste0(fo, "-shm"), force = TRUE)
+      }
+      n <- n + 1L
+    }
+  }
+  if (n > 0L) say("Nomes EN: migrei/limpei ", n, " artefato(s) com nome antigo (PT).")
+  invisible(n)
 }
 
 # Remove artefatos antigos que nao usamos mais (CSV registro, summary, caches).
@@ -561,7 +605,16 @@ cleanup_legacy_outdir <- function(root) {
     "geotrees_als_summary.csv",
     "articulacao_cache.gpkg",
     "geotrees_als_artic_indice.csv",
-    "geotrees_als_artic_indice_meta.csv"
+    "geotrees_als_artic_indice_meta.csv",
+    # nomes PT ja migrados; se sobrar, apaga
+    "geotrees_als_historico.csv",
+    "geotrees_als_problemas.txt",
+    "geotrees_als_registro.gpkg",
+    "geotrees_als_relatorio.md",
+    "geotrees_als_plano.md",
+    "geotrees_als_laz_indice.csv",
+    "geotrees_als_laz_indice_meta.csv",
+    "PARAR.txt"
   )
   n <- 0L
   for (nm in legacy) {
@@ -573,6 +626,23 @@ cleanup_legacy_outdir <- function(root) {
     n <- n + 1L
   }
   if (n > 0L) say("Limpeza: removi ", n, " arquivo(s) legado(s) do OUT_DIR.")
+  invisible(n)
+}
+
+# No fim da rodada (fila ok ou STOP.txt): apaga _inbox / _staging / tmp se vazios.
+cleanup_empty_workdir <- function(paths) {
+  dirs <- c(paths$inbox, paths$staging, paths$tmp)
+  n <- 0L
+  for (d in dirs) {
+    if (!nzchar(d) || !dir.exists(d)) next
+    left <- list.files(d, all.files = TRUE, no.. = TRUE, recursive = FALSE)
+    if (length(left)) next
+    unlink(d, recursive = TRUE, force = TRUE)
+    if (!dir.exists(d)) {
+      n <- n + 1L
+      say("Removi pasta vazia: ", basename(d))
+    }
+  }
   invisible(n)
 }
 
@@ -1514,7 +1584,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
     dry = "PLANO (dry-run, nada foi processado)",
     lista = "LISTA DE BLOCOS (nada foi processado)",
     report = "RELATORIO (sem reprocessar)",
-    parado = "PARCIAL (PARAR.txt)",
+    parado = "PARCIAL (STOP.txt)",
     if (n_go == 0L || (n_run_ok + n_run_err) >= n_go) "RODADA ENCERRADA" else "PARCIAL"
   )
 
@@ -1682,7 +1752,7 @@ build_report <- function(opt, paths, registry, historico, plan, rodada, blocos, 
     "- Rode o mesmo .bat de novo. Tile com `_INFO_summary_processing.csv` e sem `_ERROR.txt` nao e refeito.",
     "- Erro entra de novo na fila. `--force` refaz tambem o que ja deu certo.",
     "- `--report-only` so atualiza este .md, o CSV e o GPKG.",
-    "- Para parar no fim do tile atual, crie `PARAR.txt` em OUT_DIR (o script apaga o arquivo ao encerrar).",
+    "- Para parar no fim do tile atual, crie `STOP.txt` em OUT_DIR (o script apaga o arquivo ao encerrar).",
     "- A articulacao IGC nao e modificada. O poligono do tile e copiado para o GPKG de registro.",
     "",
     "Produtos do pipeline (Fischer et al. 2024, Methods in Ecology and Evolution): DTM, DSM, CHM (`chm_highest`, `chm_tin`, `chm_lspikefree`), densidade de pulso, angulo de varredura e os `_INFO_`.",
@@ -2382,7 +2452,7 @@ run_one <- function(src, opt, paths, inbox, metadata, epsg_proc = NA_integer_) {
   dest <- link_into_inbox(src, inbox, type_file)
   stem <- tools::file_path_sans_ext(basename(dest))
   zone <- utm_zone_folder(epsg_proc)
-  staging_root <- file.path(paths$root, "_staging")
+  staging_root <- paths$staging
   out_staging <- file.path(staging_root, stem)
   out_final <- file.path(paths$processed, zone, stem)
   dir.create(paths$processed, recursive = TRUE, showWarnings = FALSE)
@@ -2700,6 +2770,7 @@ main <- function() {
   }
 
   # Registro so em GPKG; a cada rodada comeca zerado a partir de processed/.
+  migrate_outdir_english_names(paths$root)
   cleanup_legacy_outdir(paths$root)
   if (!opt$dry_run && !opt$report_only) {
     n_log <- 0L
@@ -2818,9 +2889,9 @@ main <- function() {
 
   write_md <- function(modo) {
     elapsed <- as.numeric(difftime(Sys.time(), t_run, units = "mins"))
-    hist <- load_historico(paths$historico)
+    hist <- load_historico(paths$history)
     linhas <- build_report(opt, paths, registry, hist, plan, rodada, blocos, n_dup, modo, elapsed)
-    dest <- if (modo %in% c("dry", "lista")) paths$plano else paths$md
+    dest <- if (modo %in% c("dry", "lista")) paths$plan else paths$report
     write_utf8(dest, linhas)
     dest
   }
@@ -2849,8 +2920,9 @@ main <- function() {
       say("GPKG atualizado.")
     }
     dest <- write_md("report")
-    cat("Relatorio: ", dest, "\n", sep = "")
-    cat("Registro:  ", paths$gpkg, "\n", sep = "")
+    cleanup_empty_workdir(paths)
+    cat("Report:   ", dest, "\n", sep = "")
+    cat("Registry: ", paths$gpkg, "\n", sep = "")
     return(0L)
   }
 
@@ -2868,8 +2940,9 @@ main <- function() {
     release_lock(paths$lock, say)
     lock_held <- FALSE
     dest <- write_md("rodada")
-    cat("Nada novo para processar.\nRelatorio: ", dest, "\n", sep = "")
-    cat("Registro:  ", paths$gpkg, "\n", sep = "")
+    cleanup_empty_workdir(paths)
+    cat("Nada novo para processar.\nReport:   ", dest, "\n", sep = "")
+    cat("Registry: ", paths$gpkg, "\n", sep = "")
     return(0L)
   }
 
@@ -2884,7 +2957,7 @@ main <- function() {
   if (is.finite(opt$max_hours)) {
     say("Limite desta rodada: ", opt$max_hours, " hora(s). A checagem e entre tiles.")
   } else {
-    say("Limite desta rodada: indefinido (sem --max-hours). Pare com PARAR.txt ou Ctrl+C.")
+    say("Limite desta rodada: indefinido (sem --max-hours). Pare com STOP.txt ou Ctrl+C.")
   }
   say("Metadata GCA: inline (acq_crs por tile via articulacao).")
   source(file.path(dirname(dir_script), "als_registry_api.R"), local = FALSE)
@@ -2962,11 +3035,13 @@ main <- function() {
       )
       break
     }
-    if (file.exists(paths$parar)) {
+    stop_legacy <- file.path(paths$root, "PARAR.txt")
+    if (file.exists(paths$stop) || file.exists(stop_legacy)) {
       parou <- TRUE
-      log_line(paths$runlog, "PARAR.txt encontrado. Parando antes do tile ", i, "/", n_fila, ".")
-      say("PARAR.txt encontrado. Encerrando apos o tile anterior; apagando PARAR.txt.")
-      try(unlink(paths$parar), silent = TRUE)
+      log_line(paths$runlog, "STOP.txt encontrado. Parando antes do tile ", i, "/", n_fila, ".")
+      say("STOP.txt encontrado. Encerrando apos o tile anterior; apagando STOP.txt.")
+      try(unlink(paths$stop), silent = TRUE)
+      try(unlink(stop_legacy), silent = TRUE)
       break
     }
     item <- fila[i]
@@ -2980,7 +3055,7 @@ main <- function() {
         minutos = NA_real_,
         pasta_saida = ""
       )
-      append_problema(paths$problemas, meta$tile_id, result$erro)
+      append_problema(paths$problems, meta$tile_id, result$erro)
       status <- "erro"
       iniciado <- utc_now()
       row <- list(
@@ -3016,7 +3091,7 @@ main <- function() {
           log_line(paths$runlog, "AVISO GPKG ", row$tile_id, ": ", conditionMessage(e))
         })
       }
-      append_historico(paths$historico, list(
+      append_historico(paths$history, list(
         rodada_id = row$rodada_id,
         tile_id = row$tile_id,
         laz_nome = row$laz_nome,
@@ -3145,7 +3220,7 @@ main <- function() {
     if (status == "erro") {
       n_erro_run <- n_erro_run + 1L
       say("FALHOU ", meta$tile_id, ": ", result$erro)
-      append_problema(paths$problemas, meta$tile_id, result$erro)
+      append_problema(paths$problems, meta$tile_id, result$erro)
     }
     if (identical(als_code, 1L)) {
       lp_del <- resolve_laz_path(meta$tile_id, opt$laz_dir, meta$laz_path)
@@ -3182,7 +3257,7 @@ main <- function() {
       origem = "pipeline"
     )
     registry <- put_registry(registry, row)
-    append_historico(paths$historico, list(
+    append_historico(paths$history, list(
       rodada_id = row$rodada_id,
       tile_id = row$tile_id,
       laz_nome = row$laz_nome,
@@ -3262,8 +3337,9 @@ main <- function() {
   }
   modo_fim <- if (parou) "parado" else "rodada"
   dest <- write_md(modo_fim)
-  cat("\nRelatorio: ", dest, "\n", sep = "")
-  cat("Registro:  ", paths$gpkg, "\n", sep = "")
+  cleanup_empty_workdir(paths)
+  cat("\nReport:   ", dest, "\n", sep = "")
+  cat("Registry: ", paths$gpkg, "\n", sep = "")
   if (n_erro_run > 0L) 1L else 0L
 }
 
