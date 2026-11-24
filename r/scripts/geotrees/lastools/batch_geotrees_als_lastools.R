@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.6.1-lastools"
+VERSION <- "1.6.2-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -93,8 +93,8 @@ default_opt <- function() {
     nas_delete_local = FALSE,
     # Apaga o .laz em LAZ_DIR quando o tile fecha com status 1
     delete_laz_on_ok = TRUE,
-    # FALSE = so tiles com sp_inside=TRUE na articulacao; TRUE = SP + fora de SP
-    out_sp = FALSE
+    # TRUE = SP + fora (sp_inside=TRUE primeiro, depois FALSE); FALSE = so SP
+    out_sp = TRUE
   )
 }
 
@@ -357,8 +357,8 @@ help_text <- function() {
     "  --no-nas-delete-local",
     "  --delete-laz-on-ok     Apaga .laz em LAZ_DIR quando status 1 (padrao on;",
     "                        no inicio faz catch-up dos ja processados)",
-    "  --out-sp / --no-out-sp Inclui tiles fora de SP (sp_inside=FALSE). Padrao: so SP",
-    "                        (--no-out-sp). Campo sp_inside na articulacao IGC.",
+    "  --out-sp / --no-out-sp Padrao --out-sp: SP + fora; fila faz sp_inside=TRUE",
+    "                        primeiro e so depois sp_inside=FALSE. --no-out-sp = so SP.",
     "  --no-delete-laz-on-ok",
     "  --debug / --no-debug   Verbose do pipeline (padrao: quiet; env DEBUG/GEOTREES_DEBUG)",
     "Parar: STOP.txt em OUT_DIR (apagado ao encerrar). Offline: geotrees_als_api_queue.json.",
@@ -1332,7 +1332,7 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L,
     !no_filtro, "fora_do_bloco",
     data.table::fifelse(tile_id %in% done_ids & !force, "pular", "processar")
   )]
-  # OUT_SP=false: so sp_inside=TRUE (dentro de SP). OUT_SP=true: SP + fora.
+  # OUT_SP=false: so sp_inside=TRUE. OUT_SP=true: SP + fora.
   if (!isTRUE(out_sp)) {
     plan[
       acao == "processar" & (is.na(sp_inside) | sp_inside == FALSE),
@@ -1344,8 +1344,15 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L,
     acao == "processar" & (is.na(epsg_proc) | epsg_proc <= 0L),
     acao := "sem_crs"
   ]
-  # Mistura de fusos: processa um EPSG inteiro, depois o outro.
-  data.table::setorder(plan, epsg_proc, bloco, tile_id)
+  # Ordem: sp_inside=TRUE (dentro SP) primeiro; depois FALSE; por fim NA.
+  # Dentro de cada grupo, um EPSG inteiro e depois o outro.
+  plan[, sp_ord := data.table::fcase(
+    sp_inside %in% TRUE, 0L,
+    sp_inside %in% FALSE, 1L,
+    default = 2L
+  )]
+  data.table::setorder(plan, sp_ord, epsg_proc, bloco, tile_id)
+  plan[, sp_ord := NULL]
   if (limit > 0L) {
     idx_go <- which(plan$acao == "processar")
     if (length(idx_go) > limit) {
@@ -1372,8 +1379,26 @@ make_plan <- function(files_dt, idx, blocos, done_ids, limit, force, n_dup = 0L,
   )
   say(
     "Filtro SP: ",
-    if (isTRUE(out_sp)) "OUT_SP=true (dentro + fora de SP)" else "OUT_SP=false (so sp_inside=TRUE)"
+    if (isTRUE(out_sp)) {
+      "OUT_SP=true (SP + fora; ordem: sp_inside=TRUE depois FALSE)"
+    } else {
+      "OUT_SP=false (so sp_inside=TRUE)"
+    }
   )
+  if (n_go > 0L && "sp_inside" %in% names(plan)) {
+    por_sp <- plan[acao == "processar", .N, by = sp_inside][order(sp_inside, na.last = TRUE)]
+    say(
+      "Fila por sp_inside: ",
+      paste(
+        sprintf(
+          "%s=%d",
+          ifelse(is.na(por_sp$sp_inside), "NA", ifelse(por_sp$sp_inside, "TRUE", "FALSE")),
+          por_sp$N
+        ),
+        collapse = " | "
+      )
+    )
+  }
   if (nrow(grupos)) {
     say(
       "Fila por EPSG de processamento (articulacao 31983->32723, 31982->32722): ",
@@ -2606,6 +2631,11 @@ blank_meta <- function(plan_row) {
   x$epsg_proc <- suppressWarnings(as.integer(plan_row$epsg_proc))
   if (length(x$epsg_artic) != 1L) x$epsg_artic <- NA_integer_
   if (length(x$epsg_proc) != 1L) x$epsg_proc <- NA_integer_
+  if ("sp_inside" %in% names(plan_row)) {
+    x$sp_inside <- parse_sp_inside(plan_row$sp_inside)[[1]]
+  } else {
+    x$sp_inside <- NA
+  }
   x
 }
 
@@ -2909,7 +2939,8 @@ main <- function() {
   cat("LAZ:     ", opt$laz_dir, "\n", sep = "")
   cat("BLOCO:   ", if (length(blocos)) paste(blocos, collapse = ", ") else "(todos na pasta)", "\n", sep = "")
   cat(
-    "OUT_SP:  ", if (isTRUE(opt$out_sp)) "true (SP + fora)" else "false (so sp_inside=TRUE)",
+    "OUT_SP:  ",
+    if (isTRUE(opt$out_sp)) "true (SP primeiro, depois fora)" else "false (so sp_inside=TRUE)",
     "\n", sep = ""
   )
   cat("Saida:   ", paths$root, "\n", sep = "")
@@ -3072,10 +3103,15 @@ main <- function() {
   }
   cat("Na fila agora: ", n_fila, ".\n", sep = "")
   cat("Se o script parou no meio de um .laz, esse arquivo comeca de novo. Os que ja terminaram ficam pulados.\n")
-  cat("Ordem: um grupo EPSG por vez (32722 depois 32723, conforme a articulacao).\n")
+  if (isTRUE(opt$out_sp)) {
+    cat("Ordem: sp_inside=TRUE (SP) primeiro; depois sp_inside=FALSE; dentro de cada, por EPSG.\n")
+  } else {
+    cat("Ordem: so SP (sp_inside=TRUE); um grupo EPSG por vez (32722 depois 32723).\n")
+  }
   mostrar_eta(rodada, registry, n_fila)
 
   epsg_atual <- NA_integer_
+  sp_atual <- NULL
   for (i in seq_len(n_fila)) {
     nas_reap(nas, paths, wait = FALSE)
     horas_rodada <- as.numeric(difftime(Sys.time(), t_run, units = "hours"))
@@ -3176,19 +3212,41 @@ main <- function() {
       }
       next
     }
+    sp_lab <- if (isTRUE(meta$sp_inside)) "TRUE" else if (identical(meta$sp_inside, FALSE)) "FALSE" else "NA"
+    if (is.null(sp_atual) || !identical(sp_atual, meta$sp_inside)) {
+      sp_atual <- meta$sp_inside
+      n_sp <- if (is.na(meta$sp_inside)) {
+        sum(is.na(fila$sp_inside))
+      } else {
+        sum(fila$sp_inside %in% meta$sp_inside, na.rm = TRUE)
+      }
+      say(
+        "=== Grupo sp_inside=", sp_lab,
+        " (", n_sp, " tile(s); ",
+        if (isTRUE(meta$sp_inside)) "dentro de SP" else if (identical(meta$sp_inside, FALSE)) "fora de SP" else "sp_inside ausente",
+        ") ==="
+      )
+      log_line(paths$runlog, sprintf("Grupo sp_inside=%s: %d tile(s)", sp_lab, n_sp))
+      epsg_atual <- NA_integer_
+    }
     if (is.na(epsg_atual) || epsg_atual != meta$epsg_proc) {
       epsg_atual <- meta$epsg_proc
-      n_grupo <- sum(fila$epsg_proc == epsg_atual, na.rm = TRUE)
+      n_grupo <- if (is.na(meta$sp_inside)) {
+        sum(fila$epsg_proc == epsg_atual & is.na(fila$sp_inside), na.rm = TRUE)
+      } else {
+        sum(fila$epsg_proc == epsg_atual & fila$sp_inside %in% meta$sp_inside, na.rm = TRUE)
+      }
       say(
         "=== Grupo EPSG ", epsg_atual,
-        " (articulacao ", meta$epsg_artic, " -> ", epsg_atual, ", ",
+        " (articulacao ", meta$epsg_artic, " -> ", epsg_atual,
+        ", sp_inside=", sp_lab, ", ",
         n_grupo, " tile(s) neste grupo) ==="
       )
       log_line(
         paths$runlog,
         sprintf(
-          "Grupo EPSG %s (artic %s): %d tile(s)",
-          epsg_atual, meta$epsg_artic, n_grupo
+          "Grupo EPSG %s (artic %s, sp_inside=%s): %d tile(s)",
+          epsg_atual, meta$epsg_artic, sp_lab, n_grupo
         )
       )
     }

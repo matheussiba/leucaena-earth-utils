@@ -66,9 +66,9 @@ set "NAS_DELETE_LOCAL=false"
 REM true = quando tile fecha com status 1, apaga o .laz em LAZ_DIR (padrao)
 REM false = mantem o .laz
 set "DELETE_LAZ_ON_OK=true"
-REM false = so tiles com sp_inside=TRUE na articulacao (dentro de SP)
-REM true  = processa tambem tiles fora de SP (sp_inside=FALSE)
-set "OUT_SP=false"
+REM true  = SP + fora; processa sp_inside=TRUE primeiro, depois FALSE
+REM false = so tiles com sp_inside=TRUE (dentro de SP)
+set "OUT_SP=true"
 REM =====================================================================
 
 echo ============================================================
@@ -95,7 +95,7 @@ echo  Debug   : %DEBUG%
 echo  NAS     : %NAS_DIR%
 echo  NAS del : %NAS_DELETE_LOCAL%  ^(apagar OUTDIR apos copia^)
 echo  Del LAZ : %DELETE_LAZ_ON_OK%  ^(apagar .laz quando status 1^)
-echo  OUT_SP  : %OUT_SP%  ^(false=so SP; true=SP+fora^)
+echo  OUT_SP  : %OUT_SP%  ^(true=SP primeiro depois fora; false=so SP^)
 echo  Produtos: %OUT_DIR%\processed\22^|23\^<tile^>
 echo ============================================================
 echo.
@@ -169,11 +169,11 @@ if /I "%DELETE_LAZ_ON_OK%"=="false" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="0" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="no" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
 if /I "%DELETE_LAZ_ON_OK%"=="nao" set "DEL_LAZ_ARG=--no-delete-laz-on-ok"
-set "OUT_SP_ARG=--no-out-sp"
-if /I "%OUT_SP%"=="true" set "OUT_SP_ARG=--out-sp"
-if /I "%OUT_SP%"=="1" set "OUT_SP_ARG=--out-sp"
-if /I "%OUT_SP%"=="yes" set "OUT_SP_ARG=--out-sp"
-if /I "%OUT_SP%"=="sim" set "OUT_SP_ARG=--out-sp"
+set "OUT_SP_ARG=--out-sp"
+if /I "%OUT_SP%"=="false" set "OUT_SP_ARG=--no-out-sp"
+if /I "%OUT_SP%"=="0" set "OUT_SP_ARG=--no-out-sp"
+if /I "%OUT_SP%"=="no" set "OUT_SP_ARG=--no-out-sp"
+if /I "%OUT_SP%"=="nao" set "OUT_SP_ARG=--no-out-sp"
 
 REM Token so no ambiente deste .bat (set acima). Nao passa --als-api-token.
 echo Comando:
