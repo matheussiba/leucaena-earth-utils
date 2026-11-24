@@ -19,7 +19,7 @@
 #   Rscript batch_geotrees_als_lastools.R --path-lastools C:/LAStools/bin
 #   Rscript batch_geotrees_als_lastools.R --bloco EF_19 --limit 1
 
-VERSION <- "1.6.2-lastools"
+VERSION <- "1.6.3-lastools"
 LAYER_OUT <- "geotrees_tiles"
 
 REG_COLS <- c(
@@ -356,7 +356,7 @@ help_text <- function() {
     "  --nas-delete-local     Apos copia OK no NAS, apaga pasta em OUT_DIR/processed (padrao off)",
     "  --no-nas-delete-local",
     "  --delete-laz-on-ok     Apaga .laz em LAZ_DIR quando status 1 (padrao on;",
-    "                        no inicio faz catch-up dos ja processados)",
+    "                        no inicio: catch-up local + API lidar_proc=1)",
     "  --out-sp / --no-out-sp Padrao --out-sp: SP + fora; fila faz sp_inside=TRUE",
     "                        primeiro e so depois sp_inside=FALSE. --no-out-sp = so SP.",
     "  --no-delete-laz-on-ok",
@@ -2221,8 +2221,72 @@ maybe_delete_laz <- function(laz_path, laz_dir, enabled) {
   invisible(ok)
 }
 
+# Apaga .laz de tiles com lidar_proc/status=1 na API (ainda presentes em LAZ_DIR).
+# Roda antes do processamento. Atualiza plan: processar -> pular.
+laz_catchup_api <- function(opt, cfg, plan, say_fn = say) {
+  if (!isTRUE(opt$delete_laz_on_ok)) return(plan)
+  if (!isTRUE(cfg$enabled)) return(plan)
+  if (!dir.exists(opt$laz_dir)) return(plan)
+  ids <- tryCatch(
+    als_fetch_lidar_ok_ids(cfg, say_fn = say_fn),
+    error = function(e) {
+      say_fn("AVISO LAZ API catch-up: ", conditionMessage(e))
+      character()
+    }
+  )
+  if (!length(ids)) {
+    say_fn("LAZ API catch-up: nenhum tile com lidar_proc=1 (status 1) na API.")
+    return(plan)
+  }
+  say_fn(
+    "LAZ API catch-up: ", length(ids),
+    " tile(s) com lidar_proc=1 na API; procurando .laz em LAZ_DIR..."
+  )
+  hint_map <- new.env(parent = emptyenv())
+  if (!is.null(plan) && nrow(plan) && all(c("tile_id", "laz_path") %in% names(plan))) {
+    for (i in seq_len(nrow(plan))) {
+      tid <- toupper(trimws(as.character(plan$tile_id[[i]])))
+      lp <- as.character(plan$laz_path[[i]] %||% "")
+      if (nzchar(tid) && nzchar(lp) && !exists(tid, envir = hint_map, inherits = FALSE)) {
+        assign(tid, lp, envir = hint_map)
+      }
+    }
+  }
+  n_del <- 0L
+  n_miss <- 0L
+  for (tid in ids) {
+    hint <- if (exists(tid, envir = hint_map, inherits = FALSE)) {
+      get(tid, envir = hint_map, inherits = FALSE)
+    } else {
+      ""
+    }
+    lp <- resolve_laz_path(tid, opt$laz_dir, hint)
+    if (!nzchar(lp) || !file.exists(lp)) {
+      n_miss <- n_miss + 1L
+      next
+    }
+    if (maybe_delete_laz(lp, opt$laz_dir, TRUE)) n_del <- n_del + 1L
+  }
+  say_fn(
+    "LAZ API catch-up: ", n_del, " arquivo(s) removido(s)",
+    if (n_miss > 0L) paste0("; ", n_miss, " sem .laz restante em LAZ_DIR") else "",
+    "."
+  )
+  if (!is.null(plan) && nrow(plan) && "tile_id" %in% names(plan) && "acao" %in% names(plan)) {
+    n_mark <- sum(plan$tile_id %in% ids & plan$acao == "processar")
+    if (n_mark > 0L) {
+      plan[
+        tile_id %in% ids & acao == "processar",
+        `:=`(acao = "pular", motivo = "API lidar_proc=1 (status 1)")
+      ]
+      say_fn("LAZ API catch-up: ", n_mark, " tile(s) tirados da fila (ja ok na API).")
+    }
+  }
+  plan
+}
+
 # Apaga .laz de tiles ja processados (produtos OK em processed/) que ainda
-# estao em LAZ_DIR � catch-up de rodadas anteriores com DELETE_LAZ_ON_OK.
+# estao em LAZ_DIR ? catch-up de rodadas anteriores com DELETE_LAZ_ON_OK.
 laz_catchup <- function(opt, paths, registry, plan = NULL) {
   if (!isTRUE(opt$delete_laz_on_ok)) return(invisible(0L))
   if (!dir.exists(opt$laz_dir)) return(invisible(0L))
@@ -3015,6 +3079,13 @@ main <- function() {
     return(0L)
   }
 
+  # Catch-up LAZ via API (lidar_proc=1) antes de montar a fila final.
+  source(file.path(dirname(dir_script), "als_registry_api.R"), local = FALSE)
+  als_pre <- als_cfg(opt, pipeline = "lastools")
+  if (isTRUE(opt$delete_laz_on_ok) && isTRUE(als_pre$enabled)) {
+    plan <- laz_catchup_api(opt, als_pre, plan, say_fn = say)
+  }
+
   fila <- if (is.null(plan)) plan else plan[acao == "processar"]
   if (is.null(fila) || !nrow(fila)) {
     # Mesmo sem tile novo: catch-up NAS + limpeza LAZ (rodadas anteriores).
@@ -3049,8 +3120,7 @@ main <- function() {
     say("Limite desta rodada: indefinido (sem --max-hours). Pare com STOP.txt ou Ctrl+C.")
   }
   say("Metadata GCA: inline (acq_crs por tile via articulacao).")
-  source(file.path(dirname(dir_script), "als_registry_api.R"), local = FALSE)
-  als <- als_cfg(opt, pipeline = "lastools")
+  als <- als_pre
   pending_als <- list()
   if (als$enabled) {
     say(
@@ -3078,6 +3148,23 @@ main <- function() {
     nas_catchup(nas, paths, registry, idx)
   }
   laz_catchup(opt, paths, registry, plan)
+  # Refiltra a fila apos catch-ups (API pode ter marcado tiles como pular).
+  fila <- plan[acao == "processar"]
+  n_fila <- nrow(fila)
+  if (!n_fila) {
+    say("Fila vazia apos catch-up LAZ/API. Encerrando.")
+    nas_shutdown(nas, paths, wait = FALSE)
+    if (artic_ok && nrow(registry)) {
+      rebuild_gpkg(paths$gpkg, registry, opt$articulacao, opt$articulacao_layer)
+    }
+    release_lock(paths$lock, say)
+    lock_held <- FALSE
+    dest <- write_md("rodada")
+    cleanup_empty_workdir(paths)
+    cat("Nada novo para processar.\nReport:   ", dest, "\n", sep = "")
+    cat("Registry: ", paths$gpkg, "\n", sep = "")
+    return(0L)
+  }
   meta_base <- NULL
   if (nzchar(opt$metadata)) {
     say("Sobrescrevendo campos do template com --metadata: ", opt$metadata)
@@ -3085,7 +3172,6 @@ main <- function() {
   }
   inbox <- inbox_for(opt$laz_dir, paths$root, paths$inbox)
   filtro_txt <- if (length(blocos)) paste(blocos, collapse = ",") else "*"
-  n_fila <- nrow(fila)
   parou <- FALSE
   n_erro_run <- 0L
   n_pulados <- if (is.null(plan)) 0L else sum(plan$acao == "pular")

@@ -356,6 +356,70 @@ als_reset_to_pending <- function(cfg, tile_ids, reason = "reset_for_reprocess", 
   invisible(list(ok = isTRUE(out$ok), pending = out$pending))
 }
 
+# GET bruto (CSV export etc.). Nao parseia JSON.
+als_http_raw <- function(cfg, method, path) {
+  als_ensure_http_pkgs()
+  url <- paste0(cfg$url, path)
+  headers <- list(
+    "X-ALS-Token" = cfg$token,
+    "Accept" = "*/*"
+  )
+  h <- curl::new_handle()
+  curl::handle_setopt(h, customrequest = toupper(method))
+  do.call(curl::handle_setheaders, c(list(h), headers))
+  res <- curl::curl_fetch_memory(url, handle = h)
+  list(
+    status = as.integer(res$status_code),
+    raw = rawToChar(res$content)
+  )
+}
+
+# tile_ids com lidar_proc=1 no site (= status_code 1 no track=lidar).
+als_fetch_lidar_ok_ids <- function(cfg, say_fn = message) {
+  if (!isTRUE(cfg$enabled) || !nzchar(cfg$token)) return(character())
+  resp <- tryCatch(
+    als_http_raw(cfg, "GET", "/api/v1/als/export/registry.csv?track=lidar"),
+    error = function(e) list(status = 0L, raw = conditionMessage(e))
+  )
+  if (is.null(resp$status) || resp$status < 200L || resp$status >= 300L) {
+    say_fn(
+      "AVISO ALS export registry.csv falhou (HTTP ",
+      as.character(resp$status %||% "?"), ")."
+    )
+    return(character())
+  }
+  txt <- as.character(resp$raw %||% "")
+  if (!nzchar(trimws(txt))) return(character())
+  dt <- tryCatch(
+    data.table::fread(text = txt, encoding = "UTF-8", showProgress = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(dt) || !nrow(dt) || !"tile_id" %in% names(dt)) {
+    say_fn("AVISO ALS export: CSV sem tile_id.")
+    return(character())
+  }
+  code <- if ("status_code" %in% names(dt)) {
+    suppressWarnings(as.integer(dt$status_code))
+  } else if ("status" %in% names(dt)) {
+    st <- tolower(trimws(as.character(dt$status)))
+    data.table::fcase(
+      st %in% c("1", "processed", "ok", "done"), 1L,
+      st %in% c("2", "erro", "error", "failed"), 2L,
+      st %in% c("3", "em_andamento", "claimed"), 3L,
+      st %in% c("4", "pulado", "skipped"), 4L,
+      default = 0L
+    )
+  } else if ("lidar_proc" %in% names(dt)) {
+    suppressWarnings(as.integer(dt$lidar_proc))
+  } else {
+    say_fn("AVISO ALS export: CSV sem status_code/lidar_proc.")
+    return(character())
+  }
+  ids <- toupper(trimws(as.character(dt$tile_id)))
+  ids <- ids[!is.na(code) & code == 1L & nzchar(ids)]
+  unique(ids)
+}
+
 als_upsert_plan <- function(cfg, plan_dt, say_fn = message) {
   if (!isTRUE(cfg$enabled) || is.null(plan_dt) || !nrow(plan_dt)) return(invisible(FALSE))
   if (!nzchar(cfg$token)) return(invisible(FALSE))
