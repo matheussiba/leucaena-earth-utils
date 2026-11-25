@@ -6,11 +6,12 @@ TRANSFERIR_LAZ_RGB_IR_v3  —  Transferência de tiles IGC/SP por ÁREA DE INTER
 O que mudou em relação ao v2.0
 -------------------------------
 - NÃO precisa mais exportar os shapefiles de articulação com sufixo "_selecao".
-- Você passa UM arquivo espacial de ÁREA DE INTERESSE (AOI) — ponto, linha ou
-  polígono — em qualquer formato (.shp / .geojson / .gpkg / .kml / .kmz).
-- O script cruza (intersecta) essa AOI com a articulação IGC já mesclada
-  (as 3 articulações: Fehidro, Lote4 e Voo22 em um único GeoPackage) e
-  descobre automaticamente quais tiles (grids) baixar.
+- A ÁREA DE INTERESSE (AOI) é opcional. Se vier preenchida, o script cruza
+  (intersecta) esse arquivo — ponto, linha ou polígono, .shp / .geojson /
+  .gpkg / .kml / .kmz — com a articulação IGC já mesclada (Fehidro, Lote4 e
+  Voo22 num único GeoPackage) e descobre os tiles. Se a AOI ficar vazia,
+  não há recorte espacial: entram todos os grids que passarem nos filtros
+  de atributo abaixo.
 - Todos os caminhos e opções entram por ARGUMENTOS DE LINHA DE COMANDO
   (não é mais preciso editar o código).
 - Opcionalmente, ao final gera (ou incrementa) um arquivo espacial de
@@ -37,6 +38,26 @@ Articulação mesclada (padrão)
   Você NÃO precisa passar ``--articulacao`` se o arquivo padrão existir.
   Só use ``--articulacao`` / ``--articulacao-layer`` se quiser outro GPKG.
 
+Filtros de atributo (além da AOI)
+---------------------------------
+- ``--sp-out`` / ``--no-sp-out`` (padrão: desligado).
+  Desligado: só grids com ``sp_inside`` verdadeiro (dentro de SP).
+  Ligado: também entram grids fora de SP.
+- ``--max-water-percent 50``: só grids com ``water_percent`` < 50.
+  Omitir o argumento: ignora a coluna (qualquer percentual de água).
+  Valor ausente na linha não entra na cópia.
+- ``--delete-laz-out-of-parameters``: apaga, em ``DEST\\laz``, os ``.laz``
+  de runs anteriores cujo grid ficou de fora de ``--sp-out`` e de
+  ``--max-water-percent``. A AOI não entra nessa limpeza. Nome que não
+  casa com um grid é mantido. ``sp_inside`` ou ``water_percent`` ausente
+  também é mantido (não dá para afirmar que está fora).
+
+Launcher
+--------
+O arquivo versionado é ``transferir_laz_rgb_ir_v3_por_aoi-sample.bat``.
+Copie para ``transferir_laz_rgb_ir_v3_por_aoi.bat`` (essa cópia fica de
+fora do git) e edite AOI, pastas e os três filtros.
+
 Como o id do tile vira nome de arquivo
 --------------------------------------
 - LAZ : nome bate exatamente com NOMENC_2K / NOMENC_5K.
@@ -60,6 +81,9 @@ No CMD use ``^`` ou coloque tudo em uma linha só.
 
   # Mesmo comando em UMA linha (funciona no CMD e no PowerShell):
   python transferir_laz_rgb_ir_v3_por_aoi.py --aoi "C:\\caminho\\area.shp" --source-laz "D:\\laz" --source-rgb "D:\\rgb" --source-ir "D:\\ir" --dest "C:\\deleteme" --cobertura-out "C:\\deleteme\\cobertura_baixados.gpkg"
+
+  # Sem AOI: todos os grids dentro de SP com menos de 50% de água
+  python transferir_laz_rgb_ir_v3_por_aoi.py --no-sp-out --max-water-percent 50 --dest "G:\\"
 
   # Transferência padrão no PC de origem (D/E/F -> G), só passando a AOI
   python transferir_laz_rgb_ir_v3_por_aoi.py --aoi "C:\\minha_area.gpkg"
@@ -246,35 +270,280 @@ def id_do_grid(row) -> str | None:
     return None
 
 
-def selecionar_grids(articulacao_path, artic_layer, aoi_path, aoi_layer):
+def _ausente(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return len(bytes(value)) == 0
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def sp_inside_valor(value) -> bool | None:
+    """True = dentro de SP, False = fora, None = sem valor.
+
+    O campo vem como booleano/binário (1/0, True/False ou um byte).
+    """
+    if _ausente(value):
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if raw in (b"\x01", b"1", b"true", b"True", b"TRUE", b"t", b"T"):
+            return True
+        if raw in (b"\x00", b"0", b"false", b"False", b"FALSE", b"f", b"F"):
+            return False
+        if len(raw) == 1:
+            return raw[0] != 0
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    numero = _numero(value)
+    if numero is not None:
+        return numero != 0.0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "t", "yes", "y", "sim"):
+        return True
+    if text in ("0", "false", "f", "no", "n", "nao", "não"):
+        return False
+    return None
+
+
+def water_percent_valor(value) -> float | None:
+    if _ausente(value):
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            value = bytes(value).decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError:
+            return None
+    return _numero(value)
+
+
+def _numero(value) -> float | None:
+    if isinstance(value, bool):
+        numero = float(value)
+    elif isinstance(value, (int, float)):
+        numero = float(value)
+    else:
+        item = getattr(value, "item", None)
+        if callable(item) and not isinstance(value, (str, bytes, bytearray)):
+            try:
+                numero = float(item())
+            except (TypeError, ValueError):
+                return None
+        else:
+            try:
+                numero = float(value)
+            except (TypeError, ValueError):
+                return None
+    try:
+        if pd.isna(numero):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return numero
+
+
+def _nome_coluna(gdf, nome: str) -> str | None:
+    if nome in gdf.columns:
+        return nome
+    alvo = nome.casefold()
+    for col in gdf.columns:
+        if str(col).casefold() == alvo:
+            return col
+    return None
+
+
+def _fmt_num(value: float) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def classificar_grid(sp_val, water_val, sp_out: bool, max_water: float | None):
+    """'pass' entra na cópia. 'fail' está fora dos filtros. 'unknown' fica de fora da cópia e não é apagado."""
+    motivos = []
+    fail = False
+    unknown = False
+    if not sp_out:
+        if sp_val is True:
+            pass
+        elif sp_val is False:
+            fail = True
+            motivos.append("fora de SP (sp_inside=false)")
+        else:
+            unknown = True
+            motivos.append("sp_inside ausente")
+    if max_water is not None:
+        if water_val is None:
+            unknown = True
+            motivos.append("water_percent ausente")
+        elif water_val >= max_water:
+            fail = True
+            motivos.append(
+                f"water_percent={_fmt_num(water_val)} >= {_fmt_num(max_water)}"
+            )
+    if fail:
+        return "fail", "; ".join(motivos)
+    if unknown:
+        return "unknown", "; ".join(motivos)
+    return "pass", ""
+
+
+_STATUS_RANK = {"unknown": 0, "fail": 1, "pass": 2}
+
+
+class _IdTrie:
+    """Casa o nome do .laz com o id de tile mais longo (mesma borda do match preciso)."""
+
+    def __init__(self):
+        self.root: dict = {}
+
+    def add(self, tile_id: str) -> None:
+        node = self.root
+        for ch in tile_id.casefold():
+            node = node.setdefault(ch, {})
+        node["$"] = tile_id
+
+    def longest_match(self, filename: str) -> str | None:
+        stem = os.path.splitext(filename)[0]
+        node = self.root
+        found = None
+        folded = stem.casefold()
+        for i, ch in enumerate(folded):
+            nxt = node.get(ch)
+            if nxt is None:
+                break
+            node = nxt
+            if "$" in node:
+                rest = stem[i + 1 : i + 2]
+                if rest == "" or not rest.isalnum():
+                    found = node["$"]
+        return found
+
+
+def _agregar_status_tiles(artic) -> dict:
+    """Por id de tile: pass ganha de fail, fail ganha de unknown."""
+    tile_status = {}
+    for tid, status, motivo in zip(
+        artic["__tile_id"], artic["__param_status"], artic["__param_motivo"]
+    ):
+        if not isinstance(tid, str) or not tid:
+            continue
+        key = tid.casefold()
+        prev = tile_status.get(key)
+        if prev is None or _STATUS_RANK[status] > _STATUS_RANK[prev["status"]]:
+            tile_status[key] = {"id": tid, "status": status, "motivo": motivo}
+        elif (
+            status == "fail"
+            and prev["status"] == "fail"
+            and motivo
+            and motivo not in prev["motivo"]
+        ):
+            tile_status[key]["motivo"] = f"{prev['motivo']}; {motivo}"
+    return tile_status
+
+
+def selecionar_grids(
+    articulacao_path,
+    artic_layer,
+    aoi_path,
+    aoi_layer,
+    sp_out: bool,
+    max_water: float | None,
+):
     print("Lendo articulação mesclada...")
     artic = gpd.read_file(articulacao_path, layer=artic_layer)
     print(f"  Feições na articulação: {len(artic)}  | CRS: {artic.crs}")
 
-    print(f"Lendo AOI: {aoi_path}")
-    aoi = ler_aoi(aoi_path, aoi_layer)
-    print(f"  Feições na AOI: {len(aoi)}  | CRS: {aoi.crs}")
-
-    # Reprojeta a AOI para o CRS da articulação
-    if aoi.crs is None:
-        raise ValueError(
-            "A AOI não tem CRS definido. Defina o CRS do arquivo e tente de novo."
+    col_sp = _nome_coluna(artic, "sp_inside")
+    col_water = _nome_coluna(artic, "water_percent")
+    if not sp_out and col_sp is None:
+        print(
+            "[ABORTA] Coluna sp_inside não está na articulação. "
+            "SP_OUT=false precisa dela (ou use SP_OUT=true)."
         )
-    if artic.crs is not None and aoi.crs != artic.crs:
-        print(f"  Reprojetando AOI {aoi.crs} -> {artic.crs}")
-        aoi = aoi.to_crs(artic.crs)
+        raise SystemExit(2)
+    if max_water is not None and col_water is None:
+        print(
+            "[ABORTA] Coluna water_percent não está na articulação. "
+            "Esvazie MAX_WATER_PERCENT para ignorar esse filtro."
+        )
+        raise SystemExit(2)
 
-    # Interseção espacial (ponto/linha/polígono)
-    print("Cruzando AOI x articulação (intersects)...")
-    sel = gpd.sjoin(artic, aoi[["geometry"]], predicate="intersects", how="inner")
-    sel = sel[~sel.index.duplicated(keep="first")].copy()
-    print(f"  Grids intersectados: {len(sel)}")
+    if col_sp is not None:
+        sp_vals = artic[col_sp].map(sp_inside_valor).tolist()
+    else:
+        sp_vals = [None] * len(artic)
+    if col_water is not None:
+        water_vals = artic[col_water].map(water_percent_valor).tolist()
+    else:
+        water_vals = [None] * len(artic)
 
-    # id do tile por feição
-    sel["__tile_id"] = sel.apply(id_do_grid, axis=1)
+    statuses = []
+    motivos = []
+    for sp_val, water_val in zip(sp_vals, water_vals):
+        status, motivo = classificar_grid(sp_val, water_val, sp_out, max_water)
+        statuses.append(status)
+        motivos.append(motivo)
+
+    artic = artic.copy()
+    artic["__param_status"] = statuses
+    artic["__param_motivo"] = motivos
+    artic["__tile_id"] = artic.apply(id_do_grid, axis=1)
+
+    n_pass = statuses.count("pass")
+    n_fail = statuses.count("fail")
+    n_unknown = statuses.count("unknown")
+    print("Filtros de atributo:")
+    if sp_out:
+        print("  SP_OUT=true: dentro e fora de SP")
+    else:
+        n_in = sum(v is True for v in sp_vals)
+        n_out = sum(v is False for v in sp_vals)
+        n_sp_na = sum(v is None for v in sp_vals)
+        print(
+            f"  SP_OUT=false: sp_inside=true {n_in} | fora {n_out} | sem valor {n_sp_na}"
+        )
+    if max_water is None:
+        print("  Água: filtro desligado")
+    else:
+        n_baixo = sum(v is not None and v < max_water for v in water_vals)
+        n_alto = sum(v is not None and v >= max_water for v in water_vals)
+        n_w_na = sum(v is None for v in water_vals)
+        print(
+            f"  Água: water_percent < {_fmt_num(max_water)} "
+            f"-> {n_baixo} entram | {n_alto} acima ou igual | sem valor {n_w_na}"
+        )
+    print(f"  Depois dos dois filtros: entram {n_pass} | fora {n_fail} | incompletos {n_unknown}")
+
+    tile_status = _agregar_status_tiles(artic)
+    keep = artic[artic["__param_status"] == "pass"].copy()
+
+    aoi_path = (aoi_path or "").strip() or None
+    if keep.empty:
+        print("  Nenhum grid passou nos filtros.")
+        sel = keep.iloc[0:0].copy()
+    elif aoi_path:
+        print(f"Lendo AOI: {aoi_path}")
+        aoi = ler_aoi(aoi_path, aoi_layer)
+        print(f"  Feições na AOI: {len(aoi)}  | CRS: {aoi.crs}")
+        if aoi.crs is None:
+            raise ValueError(
+                "A AOI não tem CRS definido. Defina o CRS do arquivo e tente de novo."
+            )
+        if artic.crs is not None and aoi.crs != artic.crs:
+            print(f"  Reprojetando AOI {aoi.crs} -> {artic.crs}")
+            aoi = aoi.to_crs(artic.crs)
+        print("Cruzando AOI x articulação (intersects)...")
+        sel = gpd.sjoin(keep, aoi[["geometry"]], predicate="intersects", how="inner")
+        sel = sel[~sel.index.duplicated(keep="first")].copy()
+        print(f"  Grids intersectados: {len(sel)}")
+    else:
+        print("AOI vazia: sem recorte espacial (todos os grids que passaram nos filtros).")
+        sel = keep
+
     sel = sel[sel["__tile_id"].notna()].copy()
-
-    # dedup por (tile_id) mantendo a 1ª (geometria preservada p/ cobertura)
     tiles = []
     seen = set()
     for _, r in sel.iterrows():
@@ -283,8 +552,92 @@ def selecionar_grids(articulacao_path, artic_layer, aoi_path, aoi_layer):
             continue
         seen.add(tid)
         tiles.append({"tile": tid, "origem": r.get("layer", "?")})
-    print(f"  Tiles únicos: {len(tiles)}")
-    return tiles, sel
+    print(f"  Tiles únicos para copiar: {len(tiles)}")
+    return tiles, sel, tile_status
+
+
+def _listar_amostra(titulo: str, itens, limite: int = 20) -> None:
+    print(f"{titulo}: {len(itens)}")
+    for item in itens[:limite]:
+        print(f"   - {item}")
+    if len(itens) > limite:
+        print(f"   ... e mais {len(itens) - limite}")
+
+
+def apagar_laz_fora_dos_parametros(args, tile_status: dict) -> None:
+    print("\n" + "!" * 60)
+    print("APAGAR LAZ FORA DOS PARAMETROS (DEST\\laz)")
+    print("!" * 60)
+    print("A AOI não entra aqui. Só SP_OUT e MAX_WATER_PERCENT.")
+    if args.sp_out and args.max_water_percent is None:
+        print("SP_OUT=true e MAX_WATER_PERCENT vazio: não há o que esteja fora. Nada será apagado.")
+        return
+
+    dest_laz = os.path.normcase(os.path.abspath(os.path.join(args.dest, "laz")))
+    if not os.path.isdir(dest_laz):
+        print(f"Pasta de LAZ no destino não existe (nada a apagar): {dest_laz}")
+        return
+
+    trie = _IdTrie()
+    for info in tile_status.values():
+        trie.add(info["id"])
+
+    apagar = []
+    manter_ok = 0
+    sem_grid = []
+    incerto = []
+    for name in sorted(os.listdir(dest_laz)):
+        path = os.path.abspath(os.path.join(dest_laz, name))
+        if os.path.normcase(os.path.dirname(path)) != dest_laz:
+            continue
+        if not os.path.isfile(path):
+            continue
+        if os.path.splitext(name)[1].lower() != ".laz":
+            continue
+        tid = trie.longest_match(name)
+        if tid is None:
+            sem_grid.append(name)
+            continue
+        info = tile_status.get(tid.casefold())
+        if info is None or info["status"] == "pass":
+            manter_ok += 1
+            continue
+        if info["status"] == "unknown":
+            incerto.append(f"{name}  ({info['motivo']})")
+            continue
+        apagar.append((name, path, info["motivo"]))
+
+    print(f"LAZ que continuam dentro dos filtros: {manter_ok}")
+    _listar_amostra("LAZ sem grid correspondente (mantidos)", sem_grid)
+    _listar_amostra("LAZ com valor ausente (mantidos)", incerto)
+    print(f"LAZ a apagar: {len(apagar)}")
+    for name, _, motivo in apagar:
+        prefixo = "[DRY-RUN] apagaria" if args.dry_run else "apagando"
+        print(f"   {prefixo}: {name}  ({motivo})")
+
+    if args.dry_run:
+        print("[DRY-RUN] Nenhum arquivo foi apagado.")
+        return
+    if not apagar:
+        print("Nada a apagar.")
+        return
+
+    log_path = os.path.join(dest_laz, "_delete_laz_out_of_parameters.log")
+    apagados = 0
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(
+            f"\n# {time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"sp_out={args.sp_out} max_water={args.max_water_percent}\n"
+        )
+        for name, path, motivo in apagar:
+            try:
+                os.remove(path)
+                apagados += 1
+                log.write(f"{name}\t{motivo}\n")
+            except OSError as exc:
+                print(f"   !! ERRO ao apagar {name}: {exc}")
+                log.write(f"ERRO\t{name}\t{exc}\n")
+    print(f"Apagados: {apagados} de {len(apagar)}. Registro: {log_path}")
 
 
 # =============================================================================
@@ -302,6 +655,9 @@ def transferir(args) -> None:
         print("[ABORTA] Nenhum tipo selecionado (não use --no-laz/--no-rgb/--no-ir juntos).")
         return
 
+    # G:\. no .bat vira G:\ aqui. O CMD não aceita set "DEST=G:\".
+    args.dest = os.path.abspath(args.dest)
+
     sources = {"LAZ": args.source_laz, "RGB": args.source_rgb, "IR": args.source_ir}
     dests = {
         "LAZ": os.path.join(args.dest, "laz"),
@@ -309,11 +665,33 @@ def transferir(args) -> None:
         "IR": os.path.join(args.dest, "ir"),
     }
 
-    tiles, sel = selecionar_grids(
-        args.articulacao, args.articulacao_layer, args.aoi, args.aoi_layer
+    aoi = (args.aoi or "").strip() or None
+    print("AOI:", aoi or "(vazia = sem recorte espacial)")
+    print(
+        "SP_OUT:",
+        "true (dentro e fora de SP)" if args.sp_out else "false (só sp_inside=true)",
     )
+    if args.max_water_percent is None:
+        print("MAX_WATER_PERCENT: (vazio = ignora water_percent)")
+    else:
+        print(f"MAX_WATER_PERCENT: water_percent < {_fmt_num(args.max_water_percent)}")
+    print(
+        "Apagar LAZ fora dos filtros:",
+        "SIM" if args.delete_laz_out_of_parameters else "não",
+    )
+
+    tiles, sel, tile_status = selecionar_grids(
+        args.articulacao,
+        args.articulacao_layer,
+        aoi,
+        args.aoi_layer,
+        args.sp_out,
+        args.max_water_percent,
+    )
+    if args.delete_laz_out_of_parameters:
+        apagar_laz_fora_dos_parametros(args, tile_status)
     if not tiles:
-        print("\n[ABORTA] Nenhum tile encontrado na interseção. Encerrando.")
+        print("\n[ABORTA] Nenhum tile para copiar. Encerrando.")
         return
 
     if not args.dry_run:
@@ -485,14 +863,31 @@ def escrever_cobertura(sel, cobertura_flags, tipos, args) -> None:
 # =============================================================================
 # CLI
 # =============================================================================
+def _float_ou_vazio(value: str):
+    texto = str(value).strip()
+    if texto == "":
+        return None
+    return float(texto)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Transfere tiles LAZ/RGB/IR do IGC/SP a partir de uma AOI "
-                    "cruzada com a articulação mesclada.",
+        description="Transfere tiles LAZ/RGB/IR do IGC/SP. AOI opcional; "
+                    "sem AOI usa os grids que passarem em sp_inside e water_percent.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--aoi", required=True,
-                   help="Arquivo espacial da área de interesse (.shp/.geojson/.gpkg/.kml/.kmz).")
+    p.add_argument("--aoi", default=None,
+                   help="Arquivo espacial da área de interesse "
+                        "(.shp/.geojson/.gpkg/.kml/.kmz). "
+                        "Vazio: sem recorte espacial.")
+    p.add_argument("--sp-out", action=argparse.BooleanOptionalAction, default=False,
+                   help="Incluir grids fora de SP. Padrão: só sp_inside=true.")
+    p.add_argument("--max-water-percent", type=_float_ou_vazio, default=None,
+                   help="Só grids com water_percent menor que este valor. "
+                        "Vazio: ignora a coluna.")
+    p.add_argument("--delete-laz-out-of-parameters", action="store_true",
+                   help="Apaga .laz já em DEST/laz cujo grid está fora de "
+                        "--sp-out e --max-water-percent. Não usa a AOI.")
     p.add_argument("--aoi-layer", default=None,
                    help="Nome da camada dentro da AOI (para .gpkg com várias camadas).")
     p.add_argument("--articulacao", default=DEFAULT_ARTICULACAO,
@@ -516,7 +911,7 @@ def parse_args():
     p.add_argument("--overwrite", action="store_true",
                    help="Recopiar arquivos que já existem no destino.")
     p.add_argument("--dry-run", action="store_true",
-                   help="Só vistoria; não copia nada.")
+                   help="Só vistoria; não copia e não apaga nada.")
 
     p.add_argument("--cobertura-out", default=None,
                    help="Se informado, grava um arquivo espacial com os grids cobertos.")
